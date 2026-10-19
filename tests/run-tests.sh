@@ -1825,6 +1825,21 @@ if grep -q "state=running" <<<"$out"; then
   echo "FAIL: job cancel (still running)"; FAIL=$((FAIL+1))
 else echo "ok: job cancel stops it"; PASS=$((PASS+1)); fi
 
+# #96: an unknown id must NOT be reported as a failed job. `die` inside `$(jobdir ...)`
+# only left the subshell, so status/result/cancel carried on with jd="" and printed
+# `state=failed` with rc 0 — a caller reading the state was told a run had failed when
+# it never existed (a Claude Code task id passed to `/antigravity:status`, in the report).
+for sub in status result cancel; do
+  out=$("$JOB" "$sub" does-not-exist 2>"$TMP/job-nosuch.err"); rc=$?
+  if [ "$rc" -ne 0 ] && ! grep -q "state=" <<<"$out" && grep -q "no such job" "$TMP/job-nosuch.err"; then
+    echo "ok: job $sub <unknown id> -> non-zero, no state line"; PASS=$((PASS+1))
+  else
+    echo "FAIL: job $sub <unknown id> rc=$rc out='$out' err='$(cat "$TMP/job-nosuch.err")'"; FAIL=$((FAIL+1))
+  fi
+done
+out=$("$JOB" status "" 2>/dev/null); rc=$?
+check "job status with empty id -> exit 1" 1 "$rc"
+
 # structured exit code surfaces through the job layer (quota -> rc 10 + label + signal)
 qid=$(STUB_MODE=quota "$JOB" start --tier flash "quota task" 2>/dev/null)
 for _ in 1 2 3 4 5 6 7 8; do

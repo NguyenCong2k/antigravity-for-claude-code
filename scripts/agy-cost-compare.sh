@@ -18,7 +18,8 @@
 #   agy-cost-compare.sh [-t flash|flash-lo|pro] "the task prompt"
 #
 # Env overrides (USD per 1M tokens):
-#   CLAUDE_IN_PER_M  CLAUDE_OUT_PER_M     (default: 5 / 25   -- VERIFY!)
+#   CLAUDE_IN_PER_M  CLAUDE_OUT_PER_M     (default: prices.json claude_opus,
+#                                          today 4 / 20 -- VERIFY!)
 #   GEMINI_IN_PER_M  GEMINI_OUT_PER_M     (default: prices.json gemini_flash,
 #                                          today 0.75 / 3.75 -- VERIFY against
 #                                          your own Vertex rates)
@@ -58,8 +59,8 @@ fi
 # Last-resort fallbacks, used only when prices.json or python3 is unavailable. Keep them
 # in step with prices.json — a stale hardcoded rate here quotes a wrong number in exactly
 # the situation where nobody can see where it came from.
-CLAUDE_IN_PER_M="${CLAUDE_IN_PER_M:-${_CIN:-5}}"
-CLAUDE_OUT_PER_M="${CLAUDE_OUT_PER_M:-${_COUT:-25}}"
+CLAUDE_IN_PER_M="${CLAUDE_IN_PER_M:-${_CIN:-4}}"
+CLAUDE_OUT_PER_M="${CLAUDE_OUT_PER_M:-${_COUT:-20}}"
 GEMINI_IN_PER_M="${GEMINI_IN_PER_M:-${_GIN:-0.75}}"
 GEMINI_OUT_PER_M="${GEMINI_OUT_PER_M:-${_GOUT:-3.75}}"
 CPT="${CHARS_PER_TOKEN:-4}"

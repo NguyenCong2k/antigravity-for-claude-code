@@ -40,25 +40,38 @@
     "out": 7.5,
     "cached_in": 0.15
   },
-  "_comment": "Per-1M-token USD on Vertex AI, ~2026-07. VERIFY against current Google Cloud / Anthropic pricing before quoting. Global endpoints; regional/multi-region carry a ~10% premium.",
+  "_comment": "Per-1M-token USD on Vertex AI (global endpoints; regional/multi-region carry a ~10% premium). Re-verified 2026-10-19 against cloud.google.com/vertex-ai/generative-ai/pricing and platform.claude.com/docs/en/about-claude/pricing for the models agy 1.4.x actually lists: Claude Opus 5.5 (4/20), Claude Sonnet 5.5 (2/10), Gemini 3.1 Pro (2/12, cached 0.20), Gemini 4 Argon (2/10 intro, 4/20 standard). VERIFY against your own invoice before quoting: the Argon introductory rate did not appear on at least one pay-as-you-go project's billing export (it was billed 4/20 on 2026-10-09), and Google's promo end dates move.",
   "_sources": [
     "cloud.google.com/vertex-ai/generative-ai/pricing",
+    "ai.google.dev/gemini-api/docs/pricing",
     "platform.claude.com/docs/en/about-claude/pricing"
   ],
-  "_cache_note": "cache_write_mult / cache_read_mult apply to the CLAUDE deck only. Gemini prices cached input at a flat rate (cached_in) and bills context-cache STORAGE by time, which agy does not report — so any Gemini-side figure you compute here is a LOWER BOUND.",
+  "_cache_note": "cache_write_mult / cache_read_mult apply to the CLAUDE deck only (Opus 5.5 / Sonnet 5.5: 5-minute cache write = 1.25x input, cache read = 0.05x input — the Opus 4.x generation read at 0.10x). Gemini prices cached input at a flat rate (cached_in) and bills context-cache STORAGE by time, which agy does not report — so any Gemini-side figure you compute here is a LOWER BOUND.",
   "claude_opus": {
-    "in": 5.0,
-    "out": 25.0
+    "in": 4.0,
+    "out": 20.0
   },
   "claude_sonnet": {
-    "in": 3.0,
-    "out": 15.0
+    "in": 2.0,
+    "out": 10.0
   },
   "gemini_pro": {
     "in": 2.0,
-    "out": 12.0
+    "out": 12.0,
+    "cached_in": 0.2
+  },
+  "_gemini_argon_note": "Gemini 4 Argon (the `pro`-class model consumer Google AI plans list instead of 3.1 Pro, see #104). Introductory rate through 2026-11-30; `_post_2026_12` carries the standard rate that applies from 2026-12-01 — copy it over then. agy-cost-compare.sh still prices `--tier pro` from `gemini_pro`; use these rows when the AGY_USAGE `model` is an Argon name.",
+  "gemini_argon": {
+    "in": 2.0,
+    "out": 10.0,
+    "cached_in": 0.1
+  },
+  "gemini_argon_post_2026_12": {
+    "in": 4.0,
+    "out": 20.0,
+    "cached_in": 0.2
   },
   "cache_write_mult": 1.25,
-  "cache_read_mult": 0.1,
+  "cache_read_mult": 0.05,
   "orchestrator": "claude_opus"
 }

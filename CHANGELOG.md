@@ -3,6 +3,61 @@
 All notable changes to **Antigravity for Claude Code**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## 0.28.1
+
+- **`agy-job status|result|cancel <unknown id>` now exits 1 and prints no state, instead
+  of reporting `state=failed` with exit 0.** (#96) `jobdir()` calls `die` to reject an
+  unknown or ambiguous id, but every caller ran it inside `$(...)`, so `die` only left the
+  subshell: the parent carried on with `jd=""`, `job_state ""` found no `rc` file and
+  rendered `failed`, and a caller that read the state — `/antigravity:status` handed a
+  Claude Code task id, in the report — was told a run had failed when it had never existed.
+  The three call sites now read `jd="$(jobdir ...)" || exit 1`. Four checks pin it: each
+  subcommand on an unknown id (non-zero, no `state=` line, the `no such job` message on
+  stderr) and `status` on an empty id.
+- **`agy-migrate` on Windows: three fixes, with one regression test each, contributed in
+  #98 by @strekapp.** (1) `tests/test-migrate.sh` isolated itself by setting `HOME` only,
+  but Python on Windows resolves `~` from `USERPROFILE` and `CLAUDE_CONFIG_DIR` overrides
+  both, so its `--apply` and `--uninstall --apply` runs acted on the developer's real
+  `~/.gemini` (the reporter lost a real migration to it). The suite now exports
+  `USERPROFILE`, clears `CLAUDE_CONFIG_DIR`, and refuses to run (exit 2) unless `home()`,
+  `claude_dir()` and `gemini_root()` all resolve inside the synthetic HOME. (2) The plugin
+  import crashed with `'str' object has no attribute 'items'` on a manifest whose
+  `mcpServers` is a path or a list of paths (the official `cloudflare` plugin ships
+  `"./.mcp.json"`), and the exception took the whole `plugins` unit with it. The field is
+  now read in all three shapes the Claude Code manifest allows. (3) One directory recorded
+  under several spellings (`C:/Dev/x`, `c:/Dev/x`, a symlinked alias) was walked once per
+  spelling, so the second `AGENTS.md` symlink failed and the run exited 17.
+  `default_roots()` collapses on filesystem identity (`st_dev`, `st_ino`) and a new
+  `path_within()` compares `normcase(abspath())` for both the nesting check and
+  `trustedWorkspaces`. Review caught that FAT32/exFAT and some network shares report
+  `st_ino == 0` for every path, where that key would have merged every project on the
+  volume into the first one and silently stopped scanning the rest — so the identity key
+  falls back to `normcase(realpath())` when there is no inode, with its own test. Measured
+  on Linux: migrate suite 51 -> 58 passing checks (the `trustedWorkspaces` fixture also
+  carries a `tmp/..` spelling so that test fails on unfixed code on POSIX, not only on
+  Windows); the reporter measured 38/17 -> 41/16 on Windows with the 16 pre-existing
+  failures untouched.
+- **`prices.json` priced the models of two generations ago.** (#1) `claude_opus` was
+  5 / 25 and `claude_sonnet` 3 / 15 (the 4.x list), while the deck that actually
+  orchestrates today is Opus 5.5 at 4 / 20 (Sonnet 5.5: 2 / 10), so every
+  `measure-session` **est. USD** line and `agy-cost-compare` figure overstated the Claude
+  side by 25%. The COST-WEIGHTED units are untouched: those multipliers (output 5x,
+  cache_write 1.25x, cache_read 0.1x) are a fixed convention that every row in
+  `docs/AB-RESULTS.md` was recorded in, so new runs stay comparable with old ones;
+  `measure-session.py` now says so where it computes them.
+  Re-verified 2026-10-19 against the Vertex AI and Anthropic pricing pages: Opus and
+  Sonnet repriced, `cache_read_mult` 0.10 -> 0.05 (the 5.5 generation reads cache at 5% of
+  input; `measure-session.py`'s fallback for a missing key moves with it), `gemini_pro`
+  gains its `cached_in` (0.20), and two rows are added for **Gemini 4 Argon** — the
+  `pro`-class model consumer Google AI plans list instead of 3.1 Pro (#104):
+  `gemini_argon` at the introductory 2 / 10 / 0.10 through 2026-11-30 and
+  `gemini_argon_post_2026_12` at the standard 4 / 20 / 0.20. The list rates come from the
+  public pricing pages; the note that at least one pay-as-you-go project was billed the
+  standard Argon rate during the promo window comes from that project's Cloud Billing
+  export, not from a page — so check your own invoice. `agy-cost-compare.sh`'s hardcoded
+  Claude fallbacks move with the file (the drift check in the suite would have failed
+  otherwise). Suite 345 -> 349.
+
 ## 0.28.0
 
 - **`AGY_USAGE` now names the model that ran, the tier it was picked from, and agy's own

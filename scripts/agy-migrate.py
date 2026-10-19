@@ -129,6 +129,18 @@ def home():
     return os.path.expanduser("~")
 
 
+def path_within(p, parent):
+    """True when `p` is `parent` or lies inside it, however either is spelled.
+
+    Claude Code and agy record the same directory as "C:/Dev/x", "c:/Dev/x" and
+    "C:\\Dev\\x"; comparing the raw strings treats those as unrelated paths.
+    normcase folds separators (and case, on Windows) before the comparison.
+    """
+    a = os.path.normcase(os.path.abspath(p))
+    b = os.path.normcase(os.path.abspath(parent)).rstrip("/\\")
+    return a == b or a.startswith(b + os.sep)
+
+
 def claude_dir():
     """Honour CLAUDE_CONFIG_DIR — this user runs a second profile at ~/.claude-pro."""
     return os.path.abspath(os.path.expanduser(
@@ -216,10 +228,31 @@ def default_roots():
     and drop any nested under another so no tree is walked twice.
     """
     cj = read_json(claude_json_path(), None) or {}
-    paths = sorted({os.path.abspath(p) for p in (cj.get("projects") or {})
-                    if os.path.isdir(p)})
-    roots = [p for p in paths
-             if not any(p != q and p.startswith(q.rstrip("/") + os.sep) for q in paths)]
+    # One directory is often recorded under several spellings ("C:/Dev/x" and
+    # "c:/Dev/x" on Windows, a symlinked alias anywhere). As strings they are
+    # distinct roots, so the tree was walked once per spelling and every repo in
+    # it planned twice. Collapse on filesystem identity, not on the string.
+    #
+    # Identity is (st_dev, st_ino) only where the filesystem reports real inodes.
+    # FAT32/exFAT (removable drives) and some network shares report st_ino == 0 for
+    # everything, so that key would merge every distinct directory on the volume
+    # into the first one and silently stop scanning the rest. With no inode, fall
+    # back to the normalised path, which still folds case and separator spellings.
+    by_id = {}
+    for p in sorted(os.path.abspath(p) for p in (cj.get("projects") or {})):
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if not os.path.isdir(p):
+            continue
+        if st.st_ino:
+            key = ("ino", st.st_dev, st.st_ino)
+        else:
+            key = ("path", os.path.normcase(os.path.realpath(p)))
+        by_id.setdefault(key, p)
+    paths = sorted(by_id.values())
+    roots = [p for p in paths if not any(p != q and path_within(p, q) for q in paths)]
     return roots or [home()]
 
 
@@ -1042,9 +1075,10 @@ def unit_settings(plan, mf, apply_permissions):
     trusted = sorted(p for p, c in (cj.get("projects") or {}).items()
                      if c.get("hasTrustDialogAccepted") and os.path.isdir(p))
     cur_trusted = list(cur.get("trustedWorkspaces") or [])
-    add_trusted = [p for p in trusted
-                   if not any(p == t or p.startswith(t.rstrip("/") + "/")
-                              for t in cur_trusted)]
+    add_trusted = []
+    for p in trusted:
+        if not any(path_within(p, t) for t in cur_trusted + add_trusted):
+            add_trusted.append(p)
     if add_trusted:
         plan.add("settings", "ok", "trustedWorkspaces", agy_settings_path(),
                  f"add {len(add_trusted)} trusted path(s)")
@@ -1112,12 +1146,30 @@ def installed_plugins():
 
 
 def claude_plugin_mcp(src):
-    """Claude declares plugin MCP in .mcp.json or in the manifest's mcpServers."""
-    d = read_json(os.path.join(src, ".mcp.json"), None) or {}
-    servers = dict(d.get("mcpServers") or {})
+    """Claude declares plugin MCP in .mcp.json or in the manifest's mcpServers.
+
+    The manifest field is an inline map, a path relative to the plugin root, or a
+    list of such paths; each referenced file has .mcp.json's shape. Assuming the
+    inline form aborted the whole plugins unit on the first path-valued manifest.
+    """
+    def servers_in(path):
+        d = read_json(path, None)
+        if not isinstance(d, dict):
+            return {}
+        inner = d.get("mcpServers", d)
+        return inner if isinstance(inner, dict) else {}
+
+    servers = dict(servers_in(os.path.join(src, ".mcp.json")))
     man = read_json(os.path.join(src, ".claude-plugin", "plugin.json"), None) or {}
-    for k, v in (man.get("mcpServers") or {}).items():
-        servers.setdefault(k, v)
+    decl = man.get("mcpServers")
+    if isinstance(decl, dict):
+        sources = [decl]
+    else:
+        paths = [decl] if isinstance(decl, str) else decl if isinstance(decl, list) else []
+        sources = [servers_in(os.path.join(src, p)) for p in paths if isinstance(p, str)]
+    for found in sources:
+        for k, v in found.items():
+            servers.setdefault(k, v)
     return servers
 
 

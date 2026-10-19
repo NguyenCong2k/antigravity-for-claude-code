@@ -72,7 +72,10 @@ if __name__ == "__main__":
         print(f"session not found: {sys.argv[1]}"); sys.exit(1)
     r = measure(path)
     # cost-weighted units, normalized to input=1: output 5x, cache_write 1.25x,
-    # cache_read 0.1x (standard Claude multipliers; absolute $ varies by model).
+    # cache_read 0.1x. These multipliers are a FIXED convention, not a price: every
+    # row in docs/AB-RESULTS.md was recorded in these units, so they stay put even
+    # when prices.json moves (cache_read_mult is 0.05 there since 0.28.1). Dollars
+    # come from prices.json in the est. USD line below, never from these weights.
     weighted = (r['output'] * 5 + r['input'] * 1 +
                 r['cache_create'] * 1.25 + r['cache_read'] * 0.1)
     print(f"=== {label} ===")
@@ -80,14 +83,14 @@ if __name__ == "__main__":
     print(f"  output         {r['output']:,}   <- expensive (frontier)")
     print(f"  input          {r['input']:,}")
     print(f"  cache_create   {r['cache_create']:,}   <- 1.25x input (cache writes)")
-    print(f"  cache_read     {r['cache_read']:,}   <- 0.1x input (the cheap re-read)")
+    print(f"  cache_read     {r['cache_read']:,}   <- 0.1x in the weighted unit (USD uses prices.json cache_read_mult)")
     print(f"  TOTAL tokens   {r['total']:,}")
     print(f"  COST-WEIGHTED  {weighted:,.0f}   <- model-agnostic $-proxy (output 5x, etc.)")
     pr = load_prices()
     if pr and isinstance(pr.get(pr.get("orchestrator", "claude_opus")), dict):
         deck = pr.get("orchestrator", "claude_opus")
         m = pr[deck]; IN, OUT = m.get("in"), m.get("out")
-        cw = pr.get("cache_write_mult", 1.25); crd = pr.get("cache_read_mult", 0.10)
+        cw = pr.get("cache_write_mult", 1.25); crd = pr.get("cache_read_mult", 0.05)
         if IN and OUT:
             usd = (r['output']*OUT + r['input']*IN +
                    r['cache_create']*IN*cw + r['cache_read']*IN*crd) / 1e6

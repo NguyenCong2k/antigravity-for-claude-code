@@ -32,11 +32,38 @@ export APPDATA="$H/AppData/Roaming"
 export LOCALAPPDATA="$H/AppData/Local"
 export GOPATH="$H/go"
 unset PUB_CACHE UV_CACHE_DIR GOMODCACHE
+# Python on Windows resolves "~" from USERPROFILE and never reads HOME, and
+# CLAUDE_CONFIG_DIR overrides both. Without these the suite's --apply and
+# --uninstall --apply runs hit the developer's real ~/.claude and ~/.gemini.
+unset CLAUDE_CONFIG_DIR
+if command -v cygpath >/dev/null 2>&1; then
+  export USERPROFILE="$(cygpath -w "$H")"
+else
+  export USERPROFILE="$H"
+fi
 REPO="$H/work/myrepo"
 mkdir -p "$H/.claude/skills/demo-skill" \
          "$H/.claude/projects/-Users-x/memory" \
          "$REPO" \
          "$H/.gemini/config" "$H/.gemini/antigravity-cli"
+# Refuse to run at all unless the script itself resolves every config root inside
+# the synthetic HOME: a single leak here means the destructive tests below run
+# against real config.
+if ! python3 - "$MIG" "$H" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+want = os.path.normcase(os.path.realpath(os.path.expanduser(sys.argv[2])))
+for p in (m.home(), m.claude_dir(), m.gemini_root()):
+    got = os.path.normcase(os.path.realpath(p))
+    if os.path.commonpath([want, got]) != want:
+        sys.exit(f"isolation: {p} is outside the synthetic HOME {want}")
+PY
+then
+  echo "FATAL: the synthetic HOME does not isolate the script; refusing to run" >&2
+  exit 2
+fi
+
 # A real repository, not a bare .git directory: --include-repos writes only inside
 # one now, and `git rev-parse` is what decides.
 git init -q "$REPO"
@@ -637,6 +664,123 @@ OUT_ASCII="$(PYTHONIOENCODING=ascii NO_COLOR=1 python3 "$MIG" --roots "$H" 2>&1)
 if [ "$RC" -eq 0 ] && has "Total" "$OUT_ASCII" && ! has "UnicodeEncodeError" "$OUT_ASCII"; then
   ok "dry run completes on an ASCII-only stdout"
 else bad "ASCII stdout aborted the report (rc=$RC)"; fi
+
+# A manifest's mcpServers may be inline, a path, or a list of paths (cloudflare ships
+# "./.mcp.json"). Calling .items() on the string aborted the whole plugins unit.
+if python3 - "$MIG" "$TMP" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+base = os.path.join(sys.argv[2], "manifest-mcp")
+
+def plugin(name, manifest_mcp, files):
+    d = os.path.join(base, name)
+    os.makedirs(os.path.join(d, ".claude-plugin"), exist_ok=True)
+    json.dump({"name": name, "mcpServers": manifest_mcp},
+              open(os.path.join(d, ".claude-plugin", "plugin.json"), "w"))
+    for rel, obj in files.items():
+        json.dump(obj, open(os.path.join(d, rel), "w"))
+    return d
+
+wrapped = {"mcpServers": {"a": {"type": "http", "url": "https://a.test"}}}
+bare = {"b": {"command": "echo"}}
+assert m.claude_plugin_mcp(plugin("str", "./.mcp.json", {".mcp.json": wrapped})) \
+    == wrapped["mcpServers"]
+assert m.claude_plugin_mcp(plugin("lst", ["./x.json", "./y.json"],
+                                  {"x.json": wrapped, "y.json": bare})) \
+    == {**wrapped["mcpServers"], **bare}
+assert m.claude_plugin_mcp(plugin("inl", bare, {})) == bare
+assert m.claude_plugin_mcp(plugin("missing", "./nope.json", {})) == {}
+PY
+then ok "claude_plugin_mcp accepts inline, path and list-of-paths manifests"
+else bad "claude_plugin_mcp cannot read a path-valued mcpServers"; fi
+
+# Claude Code records one directory under every spelling it was opened with
+# ("C:/Dev/x" and "c:/Dev/x"). As strings they are two roots, so every repo in
+# them was walked twice and its AGENTS.md symlink attempted twice; the second
+# attempt failed and the whole run exited 17.
+if python3 - "$MIG" "$TMP" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+base = os.path.join(sys.argv[2], "alias-roots")
+real = os.path.join(base, "Proj")
+os.makedirs(real, exist_ok=True)
+alias = os.path.join(base, "PROJ")
+if not os.path.isdir(alias):            # case-sensitive FS: alias via a link instead
+    alias = os.path.join(base, "proj-link")
+    os.symlink(real, alias, target_is_directory=True)
+cj = os.path.join(base, "claude.json")
+json.dump({"projects": {real: {}, alias: {}}}, open(cj, "w"))
+m.claude_json_path = lambda: cj
+roots = m.default_roots()
+assert len(roots) == 1, roots
+PY
+then ok "default_roots collapses spellings of the same directory"
+else bad "default_roots walks one directory once per spelling"; fi
+
+# FAT32/exFAT and some network shares report st_ino == 0 for every path. Keying
+# identity on (st_dev, st_ino) there merged every distinct project on the volume into
+# the first one and silently stopped scanning the rest. Without an inode the key must
+# fall back to the normalised path, which still folds spelling variants.
+if python3 - "$MIG" "$TMP" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+base = os.path.join(sys.argv[2], "no-inode")
+a = os.path.join(base, "alpha"); b = os.path.join(base, "beta")
+os.makedirs(a, exist_ok=True); os.makedirs(b, exist_ok=True)
+cj = os.path.join(base, "claude.json")
+json.dump({"projects": {a: {}, b: {}, b.replace(os.sep, "/") + "/": {}}}, open(cj, "w"))
+m.claude_json_path = lambda: cj
+real_stat = os.stat
+class NoInode:
+    """A stat result as FAT32/exFAT report it: everything real except st_ino == 0."""
+    st_ino = 0
+    def __init__(self, st): self._st = st
+    def __getattr__(self, name): return getattr(self._st, name)
+m.os.stat = lambda p, *a, **k: NoInode(real_stat(p, *a, **k))
+try:
+    roots = m.default_roots()
+finally:
+    m.os.stat = real_stat
+assert sorted(roots) == sorted([a, b]), roots
+PY
+then ok "default_roots keeps distinct directories apart when st_ino is 0"
+else bad "default_roots merged distinct directories on a filesystem without inodes"; fi
+
+# trustedWorkspaces compared raw strings, so a project already covered by an
+# existing entry spelled with other separators (or, on a case-insensitive
+# filesystem, other case) was appended again.
+#
+# Two spellings are exercised at once, because one of them is a no-op on POSIX: the
+# project is recorded with forward slashes (differs from os.sep only on Windows), and
+# the existing trusted entry carries a `tmp/..` component, which the old
+# `startswith(t.rstrip("/") + "/")` never matched on any platform but `abspath()` folds.
+# On unfixed code the second spelling makes this test fail on Linux too.
+if python3 - "$MIG" "$TMP" <<'PY'
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+base = os.path.join(sys.argv[2], "trust-spell")
+proj = os.path.join(base, "Work", "proj")
+os.makedirs(proj, exist_ok=True)
+os.makedirs(os.path.join(base, "Work", "tmp"), exist_ok=True)
+fwd = proj.replace(os.sep, "/")
+cj = os.path.join(base, "claude.json")
+json.dump({"projects": {fwd: {"hasTrustDialogAccepted": True}}}, open(cj, "w"))
+st = os.path.join(base, "settings.json")
+json.dump({"trustedWorkspaces": [os.path.join(base, "Work", "tmp", "..")]}, open(st, "w"))
+m.claude_json_path = lambda: cj
+m.agy_settings_path = lambda: st
+m.claude_dir = lambda: os.path.join(base, "no-claude")
+plan = m.Plan()
+m.unit_settings(plan, m.Manifest(), False)
+added = [i for i in plan.items if "trustedWorkspaces" in str(i)]
+assert not added, added
+PY
+then ok "trustedWorkspaces treats separator spellings of a covered path as covered"
+else bad "trustedWorkspaces re-adds a path already covered under another spelling"; fi
 
 echo
 echo "passed: $PASS   failed: $FAIL"

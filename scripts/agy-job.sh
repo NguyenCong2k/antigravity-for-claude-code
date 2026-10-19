@@ -21,7 +21,10 @@ REG="${ANTIGRAVITY_JOBS:-$HOME/.antigravity-jobs}"
 
 die() { echo "agy-job: $*" >&2; exit 1; }
 
-# resolve a (possibly abbreviated) id to a job dir
+# resolve a (possibly abbreviated) id to a job dir.
+# Callers run this inside `$(...)`, so `die` only leaves the SUBSHELL: the parent kept
+# going with jd="" and job_state "" rendered `state=failed` for an id that never existed
+# (#96). Every call site therefore reads `jd="$(jobdir ...)" || exit 1`.
 jobdir() {
   [ -n "${1:-}" ] || die "need a job id"
   if [ -d "$REG/$1" ]; then echo "$REG/$1"; return; fi
@@ -91,7 +94,7 @@ case "$cmd" in
     [ "$found" = "1" ] || echo "(no jobs for $PWD — set ALL=1 to see all)"
     ;;
   status)
-    jd="$(jobdir "${1:-}")"; st="$(job_state "$jd")"
+    jd="$(jobdir "${1:-}")" || exit 1; st="$(job_state "$jd")"
     rc="$(cat "$jd/rc" 2>/dev/null || true)"
     echo "job:    $(basename "$jd")"
     sed 's/^/  /' "$jd/meta" 2>/dev/null
@@ -100,7 +103,7 @@ case "$cmd" in
     if [ -n "$sig" ]; then echo "  signal=${sig#AGY_SIGNAL }"; fi
     ;;
   result)
-    jd="$(jobdir "${1:-}")"; st="$(job_state "$jd")"
+    jd="$(jobdir "${1:-}")" || exit 1; st="$(job_state "$jd")"
     if [ "$st" = "running" ]; then echo "still running — try again later"; exit 2; fi
     rc="$(cat "$jd/rc" 2>/dev/null || true)"
     [ -s "$jd/err" ] && { echo "----- stderr -----" >&2; cat "$jd/err" >&2; }
@@ -108,7 +111,7 @@ case "$cmd" in
     echo "[exit rc=${rc:-?}${rc:+: $(rc_label "$rc")}]" >&2
     ;;
   cancel)
-    jd="$(jobdir "${1:-}")"
+    jd="$(jobdir "${1:-}")" || exit 1
     pid="$(cat "$jd/pid" 2>/dev/null || true)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       pkill -P "$pid" 2>/dev/null || true   # children (agy) first
