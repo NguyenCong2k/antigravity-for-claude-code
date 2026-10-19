@@ -1,7 +1,7 @@
 ---
 name: antigravity
 description: Run the Antigravity CLI (Gemini) as a collaborating AI inside Claude Code, with intelligent model routing across the software development lifecycle. Claude is the conductor/orchestrator — requirements, architecture, the hard 20%, verification, and review — and routes deterministic, high-volume work (scaffolding, boilerplate, test generation, first-pass review, migrations, web/Vertex AI Search) to Antigravity (Gemini), the cheaper, faster model. Use when the user wants to "use Antigravity / agy", "vibe code / agentic engineering", "accelerate the SDLC", "delegate to Gemini", "scaffold / generate tests / migrate", "first-pass code review", "search web or internal/company data", "deep research / multi-source research report", "second-model cross-check", or "lower token cost on a big job". Claude always verifies Antigravity's output and re-checks itself if unsatisfied.
-version: 0.28.1
+version: 0.29.0
 ---
 
 # Antigravity for Claude Code — hybrid SDLC
@@ -52,7 +52,13 @@ Routing tier within agy: `flash` (default, bulk) · `flash-lo` (cheapest, trivia
 
 **agy is multi-model.** Tiers map to Gemini by default, but you can point delegation at any
 model `agy models` lists (Claude / GPT on plans that expose them) — via `--model <exact name>`,
-or persistently with the `default_model` / `tier_*` plugin options. Keep the executor a
+or persistently with the `default_model` / `tier_*` plugin options (in `~/.claude/settings.json`
+`pluginConfigs` or env `CLAUDE_PLUGIN_OPTION_*`). The `pro` tier defaults to **Gemini 4 Argon (High)**
+since 0.29.0 (consumer Google AI plans dropped 3.1 Pro for Argon, #104, and enterprise plans on
+agy 1.4.x renamed `gemini-3.1-pro-high`'s display name to `Gemini 3.1 Pro` while also serving
+`Gemini 4 Argon (High)`). When `tier_pro` is unremapped and the active plan does not expose
+Argon, `agy-delegate` automatically falls back to `Gemini 3.1 Pro` (then `Gemini 3.1 Pro (High)`)
+and logs `pro fell back to …` on stderr — check `AGY_USAGE.model` for the model that actually ran. Keep the executor a
 *different, cheaper* model than the Claude conductor: that's what yields the cost saving **and**
 the cross-model verification value (Claude executing Claude loses both).
 
@@ -110,8 +116,8 @@ Options: `--tier flash|flash-lo|pro` · `--dir <path>` (workspace, repeatable) �
 URL reads (agy 1.1.28+; or a `read_url(<target>)` rule) / Vertex AI Search / terminal, and for writes not covered by a `permissions.allow` rule. For a
 file write the narrower grant is usually a `write_file(<dir>)` entry in
 `~/.gemini/antigravity-cli/settings.json`, which needs no flag — see below. Run write tasks
-on a branch) · `--mode accept-edits|plan`
-(agy execution mode. `--mode accept-edits` is NOT a headless write grant. Measured on agy 1.1.13 — where the flag is actually applied, since 1.1.12 fixed `--mode` being ignored in headless `-p` entirely — the write is denied exactly like one without it. Earlier notes here said "soft-denied on 1.1.3"; on a build where the flag was never applied, that observation could not tell a denial apart from the flag doing nothing. `plan` = strategize only) · `--sandbox` ·
+on a branch) · `--mode accept-edits|plan|auto`
+(agy execution mode. `--mode accept-edits` is NOT a headless write grant. Measured on agy 1.1.13 — where the flag is actually applied, since 1.1.12 fixed `--mode` being ignored in headless `-p` entirely — the write is denied exactly like one without it. Earlier notes here said "soft-denied on 1.1.3"; on a build where the flag was never applied, that observation could not tell a denial apart from the flag doing nothing. `plan` = strategize only; `auto` = dynamic plan/execute on agy ≥ 1.3.5) · `--sandbox` ·
 `--digest` (append a digest-only output contract — use it for any
 bulk read/analysis; the wrapper also warns on stderr when a reply comes back dump-sized,
 because ingesting digests instead of dumps is the single biggest cost lever) ·

@@ -13,6 +13,9 @@ DELEGATE="$ROOT/scripts/agy-delegate.sh"
 MEASURE="$ROOT/scripts/measure-session.py"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# Isolate from the developer's ~/.claude/settings.json so load_plugin_options (#101)
+# never leaks host pluginConfigs into unit tests.
+export CLAUDE_CONFIG_DIR="$TMP/claude-config"
 # SKIP is separate from PASS on purpose: a check that could not run is not a check that
 # passed. The CHANGELOG-placement gate needs a PR base, so it is skipped on a local run
 # and on push, and counting it green there would hide the fact that nothing judged it.
@@ -48,6 +51,10 @@ for _t in FLASH FLASH_LO PRO; do
     echo "ok: doctor and the wrapper agree on the $_t tier default"; PASS=$((PASS+1));
   else echo "FAIL: tier $_t default drift — wrapper '$_w' vs doctor '$_d'"; FAIL=$((FAIL+1)); fi
 done
+_cc_pro="$(sed -n 's/.*CLAUDE_PLUGIN_OPTION_TIER_PRO:-\(.*\)}".*/\1/p' "$ROOT/scripts/agy-cost-compare.sh" | head -1)"
+if [ -n "$DEF_PRO" ] && [ "$_cc_pro" = "$DEF_PRO" ]; then
+  echo "ok: agy-cost-compare and the wrapper agree on the PRO tier default"; PASS=$((PASS+1));
+else echo "FAIL: tier PRO default drift — wrapper '$DEF_PRO' vs agy-cost-compare '$_cc_pro'"; FAIL=$((FAIL+1)); fi
 
 # bash does not hoist: a function called above its definition is `command not found`,
 # exit 127, and every `if` around it silently takes the else branch. That is how two
@@ -103,11 +110,25 @@ if [ "$1" = "--help" ]; then
   echo "  --print-timeout  timeout"
   exit 0
 fi
+if [ -n "${STUB_REJECT_MODEL:-}" ]; then
+  for _a in "$@"; do
+    case "|${STUB_REJECT_MODEL}|" in
+      *"|${_a}|"*)
+        if [ "${STUB_JSON_CAPABLE:-0}" = "1" ]; then
+          printf '{"conversation_id":"","status":"ERROR","response":"","error":"invalid model selection: model %s is not recognized as a known model","usage":{}}' "$_a"
+        else
+          echo "Error: invalid --model \"$_a\": model $_a is not recognized as a known model" >&2
+        fi
+        exit 1 ;;
+    esac
+  done
+fi
 case "${STUB_MODE:-text}" in
   empty)   exit 0 ;;                  # no stdout -> wrapper should exit 3
   fail)    echo "boom" >&2; exit 7 ;; # nonzero  -> wrapper should exit 2
   args)    printf '%s\n' "$*" ;;      # echo args for assertions
   quota)   echo "Error: quota exceeded for this model" >&2; exit 1 ;;     # -> wrapper exit 10
+  credits) echo "Error: your Google AI credits balance is too low to run this request" >&2; exit 1 ;; # agy 1.2.12+ -> exit 10
   auth)    echo "Error: request is unauthenticated; please sign in" >&2; exit 1 ;; # -> exit 11
   timeout) echo "Error: deadline exceeded (the request timed out)" >&2; exit 1 ;;  # -> exit 12
   badmodel) echo "Error: invalid --model \"X\": model X is not recognized as a known model" >&2; exit 1 ;; # -> exit 14
@@ -229,7 +250,7 @@ out=$(STUB_MODE=args "$DELEGATE" --tier flash "hi" 2>/dev/null); rc=$?
 check "flash tier -> correct model string" 0 "$rc" "$DEF_FLASH" "$out"
 
 out=$(STUB_MODE=args "$DELEGATE" --tier pro "hi" 2>/dev/null); rc=$?
-check "pro tier -> correct model string" 0 "$rc" "Gemini 3.1 Pro (High)" "$out"
+check "pro tier -> correct model string" 0 "$rc" "$DEF_PRO" "$out"
 
 out=$(printf 'piped prompt' | STUB_MODE=args "$DELEGATE" - 2>/dev/null); rc=$?
 check "stdin prompt (-) read" 0 "$rc" "-p" "$out"
@@ -237,6 +258,9 @@ check "stdin prompt (-) read" 0 "$rc" "-p" "$out"
 # structured exit codes + machine-readable signal (stderr merged into capture)
 out=$(STUB_MODE=quota "$DELEGATE" "hi" 2>&1); rc=$?
 check "agy quota -> exit 10 + signal" 10 "$rc" "QUOTA_EXHAUSTED" "$out"
+
+out=$(STUB_MODE=credits "$DELEGATE" "hi" 2>&1); rc=$?
+check "agy 1.2.12+ credits balance low -> exit 10 + signal" 10 "$rc" "QUOTA_EXHAUSTED" "$out"
 
 out=$(STUB_MODE=auth "$DELEGATE" "hi" 2>&1); rc=$?
 check "agy auth -> exit 11 + signal" 11 "$rc" "AUTH_REQUIRED" "$out"
@@ -246,6 +270,22 @@ check "agy timeout -> exit 12 + signal" 12 "$rc" "TIMEOUT" "$out"
 
 out=$(STUB_MODE=badmodel "$DELEGATE" "hi" 2>&1); rc=$?
 check "agy bad --model -> exit 14 + signal" 14 "$rc" "MODEL_UNAVAILABLE" "$out"
+
+# #104: unremapped --tier pro falls back from Gemini 4 Argon (High) to Gemini 3.1 Pro,
+# then to Gemini 3.1 Pro (High) when neither Argon nor 3.1 Pro is on the plan;
+# explicit tier_pro remap does NOT fall back.
+out=$(STUB_MODE=args STUB_REJECT_MODEL="$DEF_PRO" "$DELEGATE" --tier pro "hi" 2>&1); rc=$?
+check "pro tier falls back to Gemini 3.1 Pro when Argon is unavailable (#104)" 0 "$rc" "--model Gemini 3.1 Pro" "$out"
+check "pro tier fallback emits stderr notice (#104)" 0 "$rc" "pro fell back to Gemini 3.1 Pro" "$out"
+out_fb2=$(STUB_MODE=args STUB_REJECT_MODEL="$DEF_PRO|Gemini 3.1 Pro" "$DELEGATE" --tier pro "hi" 2>&1); rc_fb2=$?
+check "pro tier falls back to Gemini 3.1 Pro (High) when both Argon and 3.1 Pro are unavailable (#104)" 0 "$rc_fb2" "--model Gemini 3.1 Pro (High)" "$out_fb2"
+err_fb=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_ok STUB_REJECT_MODEL="$DEF_PRO" "$DELEGATE" --tier pro "hi" 2>&1 >/dev/null); rc_fb=$?
+check "pro tier fallback records Gemini 3.1 Pro in AGY_USAGE (#104)" 0 "$rc_fb" '"model": "Gemini 3.1 Pro"' "$err_fb"
+out_remap_fb=$(STUB_MODE=args STUB_REJECT_MODEL="Custom Pro" CLAUDE_PLUGIN_OPTION_TIER_PRO="Custom Pro" "$DELEGATE" --tier pro "hi" 2>&1); rc_remap_fb=$?
+check "explicit tier_pro remap does not fall back to Gemini 3.1 Pro (#104)" 14 "$rc_remap_fb" "MODEL_UNAVAILABLE" "$out_remap_fb"
+if has 'fell back to' "$out_remap_fb"; then
+  echo "FAIL: explicit tier_pro remap attempted a pro fallback retry"; FAIL=$((FAIL+1));
+else echo "ok: explicit tier_pro remap does not retry on exit 14 (#104)"; PASS=$((PASS+1)); fi
 
 # agy >= 1.1.8 structured output: used internally, stdout contract unchanged
 out=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_ok "$DELEGATE" "hi" 2>/dev/null); rc=$?
@@ -398,6 +438,7 @@ err=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_ok AGY_USAGE_LOG=/nonexistent-dir/x.log
 if grep -qiE 'No such file or directory|Permission denied' <<<"$err"; then
   echo "FAIL: unwritable AGY_USAGE_LOG leaks a redirection error to stderr"; FAIL=$((FAIL+1));
 else echo "ok: unwritable AGY_USAGE_LOG is silent, not just non-fatal"; PASS=$((PASS+1)); fi
+check "unwritable AGY_USAGE_LOG emits a one-line notice (#103)" 0 0 "usage log not writable: /nonexistent-dir/x.log" "$err"
 # Off by default: no file is created when the option is unset.
 rm -f "$ULOG"
 STUB_JSON_CAPABLE=1 STUB_MODE=json_ok "$DELEGATE" "hi" >/dev/null 2>&1
@@ -410,6 +451,14 @@ if grep -q '^AGY_USAGE ' "$ULOG" 2>/dev/null; then
   echo "ok: CLAUDE_PLUGIN_OPTION_USAGE_LOG works like AGY_USAGE_LOG"; PASS=$((PASS+1));
 else echo "FAIL: plugin option usage_log had no effect"; FAIL=$((FAIL+1)); fi
 rm -f "$ULOG"
+# #103: AGY_USAGE_LOG whose parent directory does not yet exist creates the parent and writes.
+ULOG_NESTED="$TMP/missing-sub/nested/usage.log"
+rm -rf "$TMP/missing-sub"
+STUB_JSON_CAPABLE=1 STUB_MODE=json_ok AGY_USAGE_LOG="$ULOG_NESTED" "$DELEGATE" "hi" >/dev/null 2>&1
+if [ -s "$ULOG_NESTED" ] && grep -q '^AGY_USAGE ' "$ULOG_NESTED"; then
+  echo "ok: AGY_USAGE_LOG creates a missing parent directory (#103)"; PASS=$((PASS+1));
+else echo "FAIL: AGY_USAGE_LOG silently skipped a missing parent directory (#103)"; FAIL=$((FAIL+1)); fi
+rm -rf "$TMP/missing-sub"
 
 # agy >= 1.1.3: permissioned tool soft-denied headless -> rc=0 + empty stdout + stderr notice
 out=$(STUB_MODE=softdeny "$DELEGATE" "implement it" 2>&1); rc=$?
@@ -428,10 +477,26 @@ fi
 
 # userConfig default tier via env; explicit --tier still wins
 out=$(STUB_MODE=args CLAUDE_PLUGIN_OPTION_DEFAULT_TIER=pro "$DELEGATE" "hi" 2>/dev/null); rc=$?
-check "userConfig default_tier=pro -> Pro model" 0 "$rc" "Gemini 3.1 Pro (High)" "$out"
+check "userConfig default_tier=pro -> Pro model" 0 "$rc" "$DEF_PRO" "$out"
 
 out=$(STUB_MODE=args CLAUDE_PLUGIN_OPTION_DEFAULT_TIER=pro "$DELEGATE" --tier flash "hi" 2>/dev/null); rc=$?
 check "explicit --tier overrides userConfig" 0 "$rc" "$DEF_FLASH" "$out"
+
+# #101: Claude Code stores userConfig in settings.json under pluginConfigs and does NOT
+# export CLAUDE_PLUGIN_OPTION_* to Bash-tool subshells. Both agy-delegate and doctor
+# must read pluginConfigs from ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json, with env winning.
+PCDIR="$TMP/pconf"; mkdir -p "$PCDIR"
+cat > "$PCDIR/settings.json" <<'JSON'
+{"pluginConfigs":{"antigravity@antigravity-for-claude-code":{"options":{"default_tier":"pro","tier_pro":"Gemini 3.1 Pro","timeout":"7m"}}}}
+JSON
+out=$(STUB_MODE=args CLAUDE_CONFIG_DIR="$PCDIR" "$DELEGATE" "hi" 2>/dev/null); rc=$?
+check "pluginConfigs in CLAUDE_CONFIG_DIR/settings.json sets default_tier + tier_pro (#101)" 0 "$rc" "--model Gemini 3.1 Pro --print-timeout 7m" "$out"
+out=$(STUB_MODE=args CLAUDE_CONFIG_DIR="$PCDIR" CLAUDE_PLUGIN_OPTION_TIER_PRO="Claude Sonnet 5.5" "$DELEGATE" "hi" 2>/dev/null); rc=$?
+check "explicit CLAUDE_PLUGIN_OPTION_* env overrides settings.json pluginConfigs (#101)" 0 "$rc" "Claude Sonnet 5.5" "$out"
+PCHOME="$TMP/pchome"; mkdir -p "$PCHOME/.claude"
+cp "$PCDIR/settings.json" "$PCHOME/.claude/settings.json"
+out=$(env -u CLAUDE_CONFIG_DIR HOME="$PCHOME" PATH="$PATH" STUB_MODE=args "$DELEGATE" "hi" 2>/dev/null); rc=$?
+check "pluginConfigs falls back to HOME/.claude/settings.json when CLAUDE_CONFIG_DIR is unset (#101)" 0 "$rc" "Gemini 3.1 Pro" "$out"
 
 # multi-model: default_model + per-tier remap (agy supports Claude/GPT on some plans)
 out=$(STUB_MODE=args CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL="Claude Sonnet 4.5" "$DELEGATE" "hi" 2>/dev/null); rc=$?
@@ -464,7 +529,11 @@ check "agy missing -> exit 13 + AGY_MISSING signal" 13 "$rc" "AGY_MISSING" "$out
 # --print-command: dry run prints the resolved agy invocation and exits 0 (agy not run)
 out=$("$DELEGATE" --tier pro --print-command "hi" 2>/dev/null); rc=$?
 check "--print-command -> exit 0 + resolved flags" 0 "$rc" "--print-timeout 5m" "$out"
-check "--print-command shows the tier model" 0 "$rc" "Pro" "$out"
+check "--print-command shows the tier model" 0 "$rc" "$(printf '%q' "$DEF_PRO")" "$out"
+out=$("$DELEGATE" --mode auto --print-command "hi" 2>/dev/null); rc=$?
+check "--mode auto accepted (agy 1.3.5+)" 0 "$rc" "--mode auto" "$out"
+out=$("$DELEGATE" --mode bogus --print-command "hi" 2>/dev/null); rc=$?
+check "--mode bogus rejected -> exit 1" 1 "$rc"
 out=$(PATH="/usr/bin:/bin" "$DELEGATE" --print-command "hi" 2>/dev/null); rc=$?
 check "--print-command works without agy on PATH" 0 "$rc" "--print-timeout" "$out"
 # agy 1.1.18 made a valueless flag after -p an error (`--print --sandbox 'task'` used to run
@@ -1104,6 +1173,61 @@ if grep -q "tier model present: $DEF_FLASH" <<<"$out"; then
   echo "ok: doctor matches default flash tier in slug format"; PASS=$((PASS+1));
 else echo "FAIL: doctor did not confirm the default flash tier present"; FAIL=$((FAIL+1)); fi
 
+# #102 & #104: two-column `agy models` (`<slug>  <display name>`) on agy 1.2.x-1.4.x.
+# Substring matching falsely passed "Gemini 4 Argon" against "Gemini 4 Argon (High)" (#102)
+# and "Gemini 3.1 Pro (High)" against `gemini-3.1-pro-high  Gemini 3.1 Pro` (#104).
+twocol_doctor() { # $1 = tier_pro value, $2 = optional CLAUDE_CONFIG_DIR
+  local d="$TMP/agytwocol"; mkdir -p "$d"
+  cat > "$d/agy" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = --version ] && { echo "1.4.2"; exit 0; }
+if [ "$1" = models ]; then
+  printf '%s\n' \
+    "auto                            Gemini Pro Next" \
+    "gemini-pro-coordinator          Gemini Pro Orchestrator" \
+    "gemini-4-argon-high             Gemini 4 Argon (High)" \
+    "gemini-4-argon-low              Gemini 4 Argon (Low)" \
+    "gemini-3.8-flash-high           Gemini 3.8 Flash (High)" \
+    "gemini-3.8-flash-low            Gemini 3.8 Flash (Low)" \
+    "gemini-3.1-pro-high             Gemini 3.1 Pro"
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$d/agy"
+  if [ -n "${2:-}" ]; then
+    CLAUDE_CONFIG_DIR="$2" PATH="$d:$PATH" bash "$ROOT/scripts/doctor.sh" 2>&1
+  else
+    CLAUDE_PLUGIN_OPTION_TIER_PRO="$1" PATH="$d:$PATH" bash "$ROOT/scripts/doctor.sh" 2>&1
+  fi
+}
+doc_prefix="$(twocol_doctor "Gemini 4 Argon")"
+if has "tier model not in 'agy models': Gemini 4 Argon" "$doc_prefix" && has "Gemini 4 Argon (High)" "$doc_prefix"; then
+  echo "ok: doctor rejects prefix 'Gemini 4 Argon' and suggests 'Gemini 4 Argon (High)' (#102)"; PASS=$((PASS+1));
+else echo "FAIL: doctor accepted prefix 'Gemini 4 Argon' or missed suggestion (#102): $doc_prefix"; FAIL=$((FAIL+1)); fi
+doc_oldpro="$(twocol_doctor "Gemini 3.1 Pro (High)")"
+if has "tier model not in 'agy models': Gemini 3.1 Pro (High)" "$doc_oldpro" \
+   && has "available in 'agy models': Gemini 3.1 Pro" "$doc_oldpro" \
+   && ! has "Orchestrator" "$doc_oldpro"; then
+  echo "ok: doctor rejects 'Gemini 3.1 Pro (High)', ranks direct match 'Gemini 3.1 Pro' first, and skips Orchestrator (#104)"; PASS=$((PASS+1));
+else echo "FAIL: doctor matched 'Gemini 3.1 Pro (High)', buried 'Gemini 3.1 Pro', or suggested Orchestrator (#104): $doc_oldpro"; FAIL=$((FAIL+1)); fi
+doc_disp="$(twocol_doctor "Gemini 3.1 Pro")"
+if has "tier model present: Gemini 3.1 Pro" "$doc_disp"; then
+  echo "ok: doctor accepts exact effortless display name 'Gemini 3.1 Pro' (#104)"; PASS=$((PASS+1));
+else echo "FAIL: doctor rejected exact display name 'Gemini 3.1 Pro': $doc_disp"; FAIL=$((FAIL+1)); fi
+doc_slug="$(twocol_doctor "gemini-3.1-pro-high")"
+if has "tier model present: gemini-3.1-pro-high" "$doc_slug"; then
+  echo "ok: doctor accepts exact slug 'gemini-3.1-pro-high' on two-column output"; PASS=$((PASS+1));
+else echo "FAIL: doctor rejected exact slug 'gemini-3.1-pro-high': $doc_slug"; FAIL=$((FAIL+1)); fi
+doc_auto="$(twocol_doctor "auto")"
+if has "tier model present: auto" "$doc_auto"; then
+  echo "ok: doctor accepts single-word slug 'auto' on two-column output"; PASS=$((PASS+1));
+else echo "FAIL: doctor rejected single-word slug 'auto': $doc_auto"; FAIL=$((FAIL+1)); fi
+doc_pc="$(twocol_doctor "" "$PCDIR")"
+if has "tier model present: Gemini 3.1 Pro" "$doc_pc"; then
+  echo "ok: doctor loads tier_pro from settings.json pluginConfigs (#101)"; PASS=$((PASS+1));
+else echo "FAIL: doctor did not load tier_pro from settings.json pluginConfigs (#101)"; FAIL=$((FAIL+1)); fi
+
 echo "== doctor.sh agy-version gate (--tier is inert below 1.1.10) =="
 # agy ignored --model/--effort in headless `-p` until 1.1.10: the flag was applied after
 # model configuration had initialised, so the run silently fell back to the persisted
@@ -1173,7 +1297,7 @@ echo "== embedded python is not cut short by a quote =="
 # ends on a comment line, and one cut off elsewhere stops compiling. Looking for the
 # closer at the start of a line instead, as the first attempt did, false-positives on
 # hooks/nudge-delegation.sh, where it is at the end of one.
-if python3 "$HERE/check-embedded-python.py" "$ROOT"/scripts/*.sh "$ROOT"/hooks/*.sh; then
+if python3 "$HERE/check-embedded-python.py" "$ROOT"/scripts/*.sh "$ROOT"/scripts/lib/*.sh "$ROOT"/hooks/*.sh; then
   echo "ok: no embedded python is truncated by a stray quote"; PASS=$((PASS+1));
 else echo "FAIL: an embedded python block is cut short (it runs a partial program)"; FAIL=$((FAIL+1)); fi
 
@@ -1782,6 +1906,28 @@ PY
 if [ "$out" = "OK" ]; then
   echo "ok: prices.json gemini_flash matches the shipped flash tier"; PASS=$((PASS+1));
 else echo "FAIL: $out"; FAIL=$((FAIL+1)); fi
+
+# agy-cost-compare --tier pro uses gemini_argon when the pro tier resolves to Argon
+# (the 0.29.0 default) and gemini_pro when remapped to 3.1 Pro.
+cc_argon=$(STUB_MODE=text "$ROOT/scripts/agy-cost-compare.sh" --tier pro "hi" 2>/dev/null)
+check "agy-cost-compare --tier pro uses gemini_argon (out 10.00) by default" 0 "$?" "10.00" "$cc_argon"
+cc_pro31=$(STUB_MODE=text CLAUDE_PLUGIN_OPTION_TIER_PRO="Gemini 3.1 Pro" "$ROOT/scripts/agy-cost-compare.sh" --tier pro "hi" 2>/dev/null)
+check "agy-cost-compare --tier pro uses gemini_pro (out 12.00) when remapped to 3.1 Pro" 0 "$?" "12.00" "$cc_pro31"
+cc_pro31_pc=$(STUB_MODE=text CLAUDE_CONFIG_DIR="$PCDIR" "$ROOT/scripts/agy-cost-compare.sh" --tier pro "hi" 2>/dev/null)
+check "agy-cost-compare --tier pro reads tier_pro from settings.json pluginConfigs (#101)" 0 "$?" "12.00" "$cc_pro31_pc"
+cc_pro31_fb=$(STUB_MODE=text STUB_REJECT_MODEL="$DEF_PRO" "$ROOT/scripts/agy-cost-compare.sh" --tier pro "hi" 2>/dev/null)
+check "agy-cost-compare --tier pro uses gemini_pro (out 12.00) after runtime fallback to 3.1 Pro (#104)" 0 "$?" "12.00" "$cc_pro31_fb"
+# A malformed AGY_USAGE line on stderr must not abort the outer price-selection block and
+# silently revert --tier pro to the hardcoded flash-tier fallback rates (0.75 / 3.75).
+BADU_BIN="$TMP/badu-bin"; mkdir -p "$BADU_BIN"
+cat > "$BADU_BIN/agy" <<'STUB'
+#!/usr/bin/env bash
+echo "AGY_USAGE {truncated" >&2
+echo "STUB_OK"
+STUB
+chmod +x "$BADU_BIN/agy"
+cc_badu=$(PATH="$BADU_BIN:$PATH" "$ROOT/scripts/agy-cost-compare.sh" --tier pro "hi" 2>/dev/null)
+check "agy-cost-compare --tier pro survives malformed AGY_USAGE without reverting to flash rates" 0 "$?" "10.00" "$cc_badu"
 
 echo "== measure-session.py =="
 SESS="$TMP/sess.jsonl"

@@ -60,7 +60,7 @@
     "out": 12.0,
     "cached_in": 0.2
   },
-  "_gemini_argon_note": "Gemini 4 Argon (the `pro`-class model consumer Google AI plans list instead of 3.1 Pro, see #104). Introductory rate through 2026-11-30; `_post_2026_12` carries the standard rate that applies from 2026-12-01 — copy it over then. agy-cost-compare.sh still prices `--tier pro` from `gemini_pro`; use these rows when the AGY_USAGE `model` is an Argon name.",
+  "_gemini_argon_note": "Gemini 4 Argon (the `pro` tier default since 0.29.0; consumer Google AI plans list it instead of 3.1 Pro, see #104, and enterprise plans list it alongside `Gemini 3.1 Pro`). Introductory rate through 2026-11-30; `_post_2026_12` carries the standard rate that applies from 2026-12-01 — copy it over then. agy-cost-compare.sh prices `--tier pro` from `gemini_argon` when the resolved pro model is Argon and from `gemini_pro` otherwise.",
   "gemini_argon": {
     "in": 2.0,
     "out": 10.0,

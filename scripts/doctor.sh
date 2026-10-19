@@ -12,24 +12,113 @@ warn() { printf '  ⚠ %s\n' "$*"; }   # advisory; does NOT fail the check
 info() { printf '    %s\n' "$*"; }
 FAIL=0
 
+# Claude Code injects userConfig options as CLAUDE_PLUGIN_OPTION_* into HOOKS only,
+# never into Bash-tool subshells (#101). Load them from settings.json when unset.
+# shellcheck source=lib/plugin-options.sh
+. "$HERE/lib/plugin-options.sh"
+load_plugin_options
+
 # Normalize a model id to lowercase alphanumerics only, so a configured display name
 # ("Gemini 3.8 Flash (High)") and an `agy models` entry survive comparison regardless of
 # format. agy 1.1.5 switched `agy models` output from display names to slugs
 # (`gemini-3.5-flash`), which broke a strict grep and made doctor falsely warn that every
 # tier model was missing (they still worked). Both forms normalize to a comparable core.
 norm_model() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'; }
-# True if $1 (a configured tier model) matches any line in $MODELS, in either direction
-# (a slug is a substring of the display name, or vice versa).
+# True if $1 (a configured tier model) matches a model in $MODELS by exact slug or exact
+# display name (case-insensitive), never by substring containment (#102).
+#
+# Substring matching (`*"$want"*`) made "Gemini 4 Argon" pass against "Gemini 4 Argon (High)"
+# (#102) and made "Gemini 3.1 Pro (High)" pass against `gemini-3.1-pro-high  Gemini 3.1 Pro`
+# (#104) while `agy -p --model` rejected both with exit 14.
+#
+# `agy models` lines come in two shapes across versions and test stubs:
+#   - two columns: `<slug>  <display name>` (current agy 1.2.x-1.4.x; first token is a
+#     lowercase slug such as `gemini-launch-candidate-high` or `auto`, remainder is the
+#     display name) -> compare slug-shaped $1 (no spaces/parens) against the slug column,
+#     and display-name $1 against the display column.
+#   - one column: `<slug>` only (agy 1.1.5 / stub) or `<display name>` only (pre-1.1.5,
+#     where the first token is capitalized) -> compare normalized $1 for exact equality
+#     against the normalized line.
 model_present() {
-  local want line n; want="$(norm_model "$1")"; [ -n "$want" ] || return 1
+  local want line first first_lc rest is_slug=1
+  want="$(norm_model "$1")"; [ -n "$want" ] || return 1
+  case "$1" in *[[:space:]\(\)]*) is_slug=0 ;; esac
   while IFS= read -r line; do
-    n="$(norm_model "$line")"; [ -n "$n" ] || continue
-    case "$want" in *"$n"*) return 0 ;; esac
-    case "$n" in *"$want"*) return 0 ;; esac
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    first="${line%%[[:space:]]*}"
+    first_lc="$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')"
+    rest="${line#"$first"}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    if [ -n "$rest" ] && [ "$first" = "$first_lc" ]; then
+      if [ "$is_slug" -eq 1 ]; then
+        [ "$want" = "$(norm_model "$first")" ] && return 0
+      else
+        [ "$want" = "$(norm_model "$rest")" ] && return 0
+      fi
+    else
+      [ "$want" = "$(norm_model "$line")" ] && return 0
+    fi
   done <<EOF
 $MODELS
 EOF
   return 1
+}
+
+# Suggest up to 3 candidate models from $MODELS when a tier model is missing (#102, #104).
+# Ranks direct substring matches (either $n contains $want, e.g. "Gemini 4 Argon" ->
+# "Gemini 4 Argon (High)", or $want contains the normalized display name, e.g.
+# "Gemini 3.1 Pro (High)" -> "Gemini 3.1 Pro") AHEAD of generic family matches (argon/pro
+# or flash) across the entire model list, so earlier family rows never bury a direct match
+# that appears later in `agy models`. Specialist orchestrator/coordinator entries are
+# skipped on generic family matches.
+suggest_models() {
+  local want line first first_lc rest disp n nd fam="flash"
+  local direct=() family=() picked=() item
+  want="$(norm_model "$1")"
+  case "$want" in *pro*|*argon*|*opus*) fam="pro" ;; esac
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    first="${line%%[[:space:]]*}"
+    first_lc="$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')"
+    rest="${line#"$first"}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    disp="$line"
+    if [ -n "$rest" ] && [ "$first" = "$first_lc" ]; then
+      disp="$rest"
+    fi
+    n="$(norm_model "$line")"
+    nd="$(norm_model "$disp")"
+    if [ -n "$want" ] && [ -n "$nd" ] && {
+         case "$n" in *"$want"*) true ;; *) false ;; esac ||
+         case "$want" in *"$nd"*) true ;; *) false ;; esac
+       }; then
+      direct+=("$disp")
+    else
+      case "$n" in *orchestrator*|*coordinator*) continue ;; esac
+      if [ "$fam" = "pro" ] && case "$n" in *argon*|*pro*|*opus*) true ;; *) false ;; esac; then
+        family+=("$disp")
+      elif [ "$fam" = "flash" ] && case "$n" in *flash*) true ;; *) false ;; esac; then
+        family+=("$disp")
+      fi
+    fi
+  done <<EOF
+$MODELS
+EOF
+  for item in "${direct[@]:-}" "${family[@]:-}"; do
+    [ -n "$item" ] || continue
+    picked+=("$item")
+    [ "${#picked[@]}" -ge 3 ] && break
+  done
+  local out=""
+  for item in "${picked[@]:-}"; do
+    [ -n "$item" ] || continue
+    out="${out:+$out, }$item"
+  done
+  [ -n "$out" ] && printf '%s' "$out"
 }
 
 # Resolve a usable `timeout` command (GNU coreutils, or macOS Homebrew gtimeout)
@@ -323,12 +412,14 @@ if command -v agy >/dev/null 2>&1; then
     # multi-model and plan-dependent, so a miss is a WARNING, not a failure.
     FLASH="${CLAUDE_PLUGIN_OPTION_TIER_FLASH:-Gemini 3.8 Flash (High)}"
     FLASH_LO="${CLAUDE_PLUGIN_OPTION_TIER_FLASH_LO:-Gemini 3.8 Flash (Low)}"
-    PRO="${CLAUDE_PLUGIN_OPTION_TIER_PRO:-Gemini 3.1 Pro (High)}"
+    PRO="${CLAUDE_PLUGIN_OPTION_TIER_PRO:-Gemini 4 Argon (High)}"
     for m in "$FLASH" "$FLASH_LO" "$PRO"; do
       if model_present "$m"; then
         ok "tier model present: $m"
       else
         warn "tier model not in 'agy models': $m"
+        SUGG="$(suggest_models "$m")"
+        [ -n "$SUGG" ] && info "available in 'agy models': $SUGG"
         info "agy is multi-model/plan-dependent — remap tiers via CLAUDE_PLUGIN_OPTION_TIER_* (or set _DEFAULT_MODEL), or pass --model <name from \`agy models\`)"
       fi
     done

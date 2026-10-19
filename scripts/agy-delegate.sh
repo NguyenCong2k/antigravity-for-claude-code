@@ -28,11 +28,12 @@
 #       --sandbox                    Run agent with terminal sandbox restrictions
 #       --digest                     Append a digest-only output contract to the prompt
 #                                    (ingest digests, not raw dumps — the biggest cost lever)
-#       --mode <accept-edits|plan>   agy execution mode (agy >= 1.1.0). accept-edits is NOT a
+#       --mode <accept-edits|plan|auto> agy execution mode (agy >= 1.1.0; auto >= 1.3.5). accept-edits is NOT a
 #                                    write grant: measured on agy 1.1.13, where the flag is
 #                                    applied at all (1.1.12 fixed it being ignored headless),
 #                                    the write is denied exactly like one without it. Use a
 #                                    permissions.allow rule or --yolo. plan: strategize only.
+#                                    auto: dynamic plan/execute based on task complexity.
 #   -c, --continue                   Resume the most recent agy conversation (stateful)
 #       --conversation <id>          Resume a specific agy conversation by ID (stateful)
 #   -m, --model <exact name>         Use an exact agy model (any from `agy models`: Gemini/Claude/GPT…)
@@ -65,11 +66,17 @@
 #
 # agy is multi-model: tiers map to Gemini by default, but you can point delegation at any
 # model `agy models` lists (e.g. Claude/GPT on plans that expose them). Defaults via plugin
-# userConfig (env): CLAUDE_PLUGIN_OPTION_DEFAULT_TIER, _TIMEOUT, _DEFAULT_MODEL (exact name),
-# _USAGE_LOG, and per-tier remaps _TIER_FLASH / _TIER_FLASH_LO / _TIER_PRO.
-# Explicit --model/--tier win; AGY_USAGE_LOG wins over _USAGE_LOG.
+# userConfig (env or ~/.claude/settings.json pluginConfigs): CLAUDE_PLUGIN_OPTION_DEFAULT_TIER,
+# _TIMEOUT, _DEFAULT_MODEL (exact name), _USAGE_LOG, and per-tier remaps _TIER_FLASH /
+# _TIER_FLASH_LO / _TIER_PRO. Explicit --model/--tier win; AGY_USAGE_LOG wins over _USAGE_LOG.
 #
 set -euo pipefail
+
+# Claude Code injects userConfig options as CLAUDE_PLUGIN_OPTION_* into HOOKS only,
+# never into Bash-tool subshells (#101). Load them from settings.json when unset.
+# shellcheck source=lib/plugin-options.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib/plugin-options.sh"
+load_plugin_options
 
 TIER="${CLAUDE_PLUGIN_OPTION_DEFAULT_TIER:-flash}"
 TIMEOUT="${CLAUDE_PLUGIN_OPTION_TIMEOUT:-5m}"
@@ -91,6 +98,19 @@ die() { echo "agy-delegate: $*" >&2; exit 1; }
 # (avoids `shift 2` aborting under `set -e` with a cryptic "shift count" error).
 need() { [ "$1" -ge 2 ] || die "option '$2' needs a value"; }
 
+# True when an agy error blob says the requested --model does not exist on this plan.
+# ONE definition, used by both the exit-14 classifier and the pro-tier fallback trigger
+# (#104): if agy rewords the message, both move together — a drift between the two
+# would make the fallback quietly stop firing while exit 14 still said what it says.
+model_unavailable_blob() {
+  shopt -s nocasematch
+  case "$1" in
+    *"invalid --model"*|*"is not recognized as a known model"*|*"not a known model"*)
+      shopt -u nocasematch; return 0 ;;
+  esac
+  shopt -u nocasematch; return 1
+}
+
 # Optional side channel for AGY_USAGE / AGY_SIGNAL.
 #
 # WHY this exists: these lines go to stderr so they never pollute the conductor's
@@ -104,12 +124,24 @@ need() { [ "$1" -ge 2 ] || die "option '$2' needs a value"; }
 # Set AGY_USAGE_LOG=/path/to/log (or the plugin option `usage_log`). Appended to,
 # never truncated; failure to write is non-fatal (measurement must not break work).
 USAGE_LOG="${AGY_USAGE_LOG:-${CLAUDE_PLUGIN_OPTION_USAGE_LOG:-}}"
+USAGE_LOG_WARNED=0
 tee_usage() { # $1 = the full line, already formatted
   [ -n "$USAGE_LOG" ] || return 0
-  # `2>/dev/null` FIRST: redirections apply left to right, so with `>>"$f" 2>/dev/null`
-  # the append is attempted while stderr is still the real stderr — an unwritable path
-  # then leaks a bash redirection error on every single call. Order matters here.
-  printf '%s\n' "$1" 2>/dev/null >>"$USAGE_LOG" || true
+  # Create the parent directory when missing (#103: setting AGY_USAGE_LOG=/tmp/sub/usage.log
+  # silently produced nothing because `>>` does not create parent directories). If mkdir or
+  # the append still fails (e.g. /nonexistent-dir/x.log under /), stay non-fatal, suppress
+  # the raw bash redirection error (`2>/dev/null` BEFORE `>>`), and emit a single clean notice.
+  local dir
+  dir="$(dirname "$USAGE_LOG")"
+  if [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null; then
+    if printf '%s\n' "$1" 2>/dev/null >>"$USAGE_LOG"; then
+      return 0
+    fi
+  fi
+  if [ "$USAGE_LOG_WARNED" -eq 0 ]; then
+    USAGE_LOG_WARNED=1
+    echo "agy-delegate: usage log not writable: $USAGE_LOG" >&2
+  fi
 }
 
 # Emit a one-line machine-readable failure signal to stderr. $1=status $2=reason.
@@ -184,7 +216,7 @@ model_for_tier() {
   case "$1" in
     flash)    echo "${CLAUDE_PLUGIN_OPTION_TIER_FLASH:-Gemini 3.8 Flash (High)}" ;;
     flash-lo) echo "${CLAUDE_PLUGIN_OPTION_TIER_FLASH_LO:-Gemini 3.8 Flash (Low)}" ;;
-    pro)      echo "${CLAUDE_PLUGIN_OPTION_TIER_PRO:-Gemini 3.1 Pro (High)}" ;;
+    pro)      echo "${CLAUDE_PLUGIN_OPTION_TIER_PRO:-Gemini 4 Argon (High)}" ;;
     *) die "unknown tier '$1' (use flash | flash-lo | pro)" ;;
   esac
 }
@@ -241,8 +273,8 @@ while [ $# -gt 0 ]; do
     --sandbox)      SANDBOX=1; shift ;;
     --digest)       DIGEST=1; shift ;;               # ask agy for a digest-only reply
     --mode)         need "$#" "$1"; MODE="$2"; shift 2
-                    case "$MODE" in accept-edits|plan) ;;
-                      *) die "invalid --mode '$MODE' (use accept-edits | plan; agy >= 1.1.0)" ;;
+                    case "$MODE" in accept-edits|plan|auto) ;;
+                      *) die "invalid --mode '$MODE' (use accept-edits | plan | auto; agy >= 1.1.0, auto >= 1.3.5)" ;;
                     esac ;;
     -c|--continue)  CONTINUE=1; shift ;;            # resume most recent agy conversation
     --conversation) need "$#" "$1"; CONV_ID="$2"; shift 2 ;; # resume a specific conversation by ID
@@ -435,42 +467,52 @@ if on_windows_native && [ -z "$TO_CMD" ]; then
   echo "agy-delegate:   call never returns, run from WSL/macOS/Linux, or install coreutils \`timeout\`." >&2
 fi
 
-set +e
-if [ -n "$TO_CMD" ]; then
-  # --kill-after sends SIGKILL if agy ignores the initial SIGTERM (defensive).
-  "$TO_CMD" --kill-after=10 "$TO_SECS" agy "${ARGS[@]}" -p "$PROMPT" < /dev/null >"$OUTF" 2>"$ERR"
-  RC=$?
-else
-  agy "${ARGS[@]}" -p "$PROMPT" < /dev/null >"$OUTF" 2>"$ERR"
-  RC=$?
+# #104: when --tier pro uses the unremapped default (Gemini 4 Argon (High)) on a plan
+# that does not expose Argon (e.g. API-key / GCP project / older agy), fall back through
+# Gemini 3.1 Pro (agy 1.4+ display name) and Gemini 3.1 Pro (High) (pre-1.4 / API-key
+# display name) so those plan shapes work out of the box.
+PRO_FALLBACK_MODELS=()
+if [ "$USAGE_TIER" = "pro" ] && [ -z "${CLAUDE_PLUGIN_OPTION_TIER_PRO:-}" ]; then
+  PRO_FALLBACK_MODELS=("Gemini 3.1 Pro" "Gemini 3.1 Pro (High)")
 fi
-OUT="$(cat "$OUTF" 2>/dev/null)"
-set -e
 
-# --- unwrap the structured envelope (JSON mode) --------------------------------
-# Replaces OUT with the model's text so the stdout contract is unchanged, exposes
-# the structured error for classification, and reports token usage on stderr.
-# Any parse failure falls back to treating OUT as plain text (never fatal).
-JSON_STATUS=""; JSON_ERROR=""; JSON_DENIED=""
-# Glob, not ${OUT//[...]/}: stripping the whole string to test emptiness is minutes-to-
-# hours at tens of KB on macOS /bin/bash 3.2 (n^~2.6); the glob stops at the first hit.
-if [ "$JSON_MODE" -eq 1 ] && [[ "$OUT" = *[!$' \t\n\r']* ]]; then
-  # The response can be multi-line, so it goes to a temp file; the single-line
-  # metadata comes back on stdout. (Command substitution strips NUL bytes, so a
-  # NUL-delimited stream is not an option here.)
-  RESP="$(mktemp "${TMPDIR:-/tmp}/agy-resp.XXXXXX")"
-  # The error text goes to its OWN file, not back out through `meta`. agy's error
-  # strings quote the offending value (`--model \"foo\"`), and pulling the field out
-  # of `meta` with sed truncates at that first escaped quote — which silently hid the
-  # diagnostic from the classifier, so a bad --model/tier remap reported a generic
-  # "agy failed" (exit 2) instead of MODEL_UNAVAILABLE (14). Let python, which already
-  # has the parsed object, write the raw value out.
-  JERR="$(mktemp "${TMPDIR:-/tmp}/agy-err.XXXXXX")"
-  # agy 1.1.27+: `denied_actions` is a list of {action, display_name}; the tool names
-  # come out as one space-separated line, same file discipline as the error text.
-  JDEN="$(mktemp "${TMPDIR:-/tmp}/agy-den.XXXXXX")"
-  meta="$(AGY_JSON="$OUT" AGY_RESP_FILE="$RESP" AGY_ERR_FILE="$JERR" AGY_DEN_FILE="$JDEN" \
-        AGY_MODEL="$MODEL" AGY_TIER="$USAGE_TIER" python3 - <<'PY' 2>/dev/null || true
+while :; do
+  set +e
+  if [ -n "$TO_CMD" ]; then
+    # --kill-after sends SIGKILL if agy ignores the initial SIGTERM (defensive).
+    "$TO_CMD" --kill-after=10 "$TO_SECS" agy "${ARGS[@]}" -p "$PROMPT" < /dev/null >"$OUTF" 2>"$ERR"
+    RC=$?
+  else
+    agy "${ARGS[@]}" -p "$PROMPT" < /dev/null >"$OUTF" 2>"$ERR"
+    RC=$?
+  fi
+  OUT="$(cat "$OUTF" 2>/dev/null)"
+  set -e
+
+  # --- unwrap the structured envelope (JSON mode) --------------------------------
+  # Replaces OUT with the model's text so the stdout contract is unchanged, exposes
+  # the structured error for classification, and reports token usage on stderr.
+  # Any parse failure falls back to treating OUT as plain text (never fatal).
+  JSON_STATUS=""; JSON_ERROR=""; JSON_DENIED=""; meta=""
+  # Glob, not ${OUT//[...]/}: stripping the whole string to test emptiness is minutes-to-
+  # hours at tens of KB on macOS /bin/bash 3.2 (n^~2.6); the glob stops at the first hit.
+  if [ "$JSON_MODE" -eq 1 ] && [[ "$OUT" = *[!$' \t\n\r']* ]]; then
+    # The response can be multi-line, so it goes to a temp file; the single-line
+    # metadata comes back on stdout. (Command substitution strips NUL bytes, so a
+    # NUL-delimited stream is not an option here.)
+    RESP="$(mktemp "${TMPDIR:-/tmp}/agy-resp.XXXXXX")"
+    # The error text goes to its OWN file, not back out through `meta`. agy's error
+    # strings quote the offending value (`--model \"foo\"`), and pulling the field out
+    # of `meta` with sed truncates at that first escaped quote — which silently hid the
+    # diagnostic from the classifier, so a bad --model/tier remap reported a generic
+    # "agy failed" (exit 2) instead of MODEL_UNAVAILABLE (14). Let python, which already
+    # has the parsed object, write the raw value out.
+    JERR="$(mktemp "${TMPDIR:-/tmp}/agy-err.XXXXXX")"
+    # agy 1.1.27+: `denied_actions` is a list of {action, display_name}; the tool names
+    # come out as one space-separated line, same file discipline as the error text.
+    JDEN="$(mktemp "${TMPDIR:-/tmp}/agy-den.XXXXXX")"
+    meta="$(AGY_JSON="$OUT" AGY_RESP_FILE="$RESP" AGY_ERR_FILE="$JERR" AGY_DEN_FILE="$JDEN" \
+          AGY_MODEL="$MODEL" AGY_TIER="$USAGE_TIER" python3 - <<'PY' 2>/dev/null || true
 import json, os, sys
 raw = os.environ.get("AGY_JSON", "")
 try:
@@ -512,18 +554,40 @@ print(json.dumps({
 }))
 PY
 )"
-  if [ -n "$meta" ]; then
-    # `status` is a bare enum with no quotes inside it, so sed is safe there.
-    JSON_STATUS="$(printf '%s' "$meta" | sed -n 's/.*"status": *"\([^"]*\)".*/\1/p')"
-    JSON_ERROR="$(cat "$JERR" 2>/dev/null)"
-    JSON_DENIED="$(cat "$JDEN" 2>/dev/null)"
-    OUT="$(cat "$RESP" 2>/dev/null)"
-    printf 'AGY_USAGE %s\n' "$meta" >&2
-    tee_usage "AGY_USAGE $meta"
-    # A structured ERROR is authoritative even if agy exited 0.
-    [ "$JSON_STATUS" = "ERROR" ] && [ "$RC" -eq 0 ] && RC=1
+    if [ -n "$meta" ]; then
+      # `status` is a bare enum with no quotes inside it, so sed is safe there.
+      JSON_STATUS="$(printf '%s' "$meta" | sed -n 's/.*"status": *"\([^"]*\)".*/\1/p')"
+      JSON_ERROR="$(cat "$JERR" 2>/dev/null)"
+      JSON_DENIED="$(cat "$JDEN" 2>/dev/null)"
+      OUT="$(cat "$RESP" 2>/dev/null)"
+      # A structured ERROR is authoritative even if agy exited 0.
+      [ "$JSON_STATUS" = "ERROR" ] && [ "$RC" -eq 0 ] && RC=1
+    fi
+    rm -f "$RESP" "$JERR" "$JDEN"
   fi
-  rm -f "$RESP" "$JERR" "$JDEN"
+
+  if [ "$RC" -ne 0 ] && [ "${#PRO_FALLBACK_MODELS[@]}" -gt 0 ]; then
+    probe_blob="$(cat "$ERR" 2>/dev/null)"
+    [ -n "$JSON_ERROR" ] && probe_blob="$JSON_ERROR
+$probe_blob"
+    if model_unavailable_blob "$probe_blob"; then
+        MODEL="${PRO_FALLBACK_MODELS[0]}"
+        if [ "${#PRO_FALLBACK_MODELS[@]}" -gt 1 ]; then
+          PRO_FALLBACK_MODELS=("${PRO_FALLBACK_MODELS[@]:1}")
+        else
+          PRO_FALLBACK_MODELS=()
+        fi
+        ARGS[1]="$MODEL"
+        echo "agy-delegate: pro fell back to $MODEL (Argon not on this plan)" >&2
+        continue
+    fi
+  fi
+  break
+done
+
+if [ -n "$meta" ]; then
+  printf 'AGY_USAGE %s\n' "$meta" >&2
+  tee_usage "AGY_USAGE $meta"
 fi
 
 # `timeout` exits 124 (SIGTERM) or 137 (SIGKILL after --kill-after) when it had to
@@ -594,21 +658,22 @@ $blob"
     *"user denied permission"*|*"permission check failed"*|*"auto-denied"*|\
     *"permission that headless"*|*"dangerously-skip-permissions"*)
       shopt -u nocasematch; permission_denied shown ;;
-    *quota*|*"rate limit"*|*"resource exhausted"*)
+    *quota*|*"rate limit"*|*"resource exhausted"*|*"credits balance is too low"*|*"insufficient credits"*|*"spend cap"*)
       shopt -u nocasematch; signal QUOTA_EXHAUSTED "agy quota / rate limit"; exit 10 ;;
     *unauthenticated*|*unauthorized*|*"sign in"*|*"please authenticate"*|*reauth*)
       shopt -u nocasematch; signal AUTH_REQUIRED "agy not authenticated — run \`agy\` once"; exit 11 ;;
     *"timed out"*|*"deadline exceeded"*|*"print-timeout"*)
       shopt -u nocasematch; signal TIMEOUT "agy print-timeout / deadline exceeded"; exit 12 ;;
-    *"invalid --model"*|*"is not recognized as a known model"*|*"not a known model"*)
-      # agy >= 1.1.2 hard-fails (instead of silently downgrading) when --model can't be
-      # resolved — common when a tier_* / default_model remap points at a model this plan
-      # doesn't expose. Surface it as its own actionable category.
-      shopt -u nocasematch
-      echo "agy-delegate: model '$MODEL' is not available on this plan — run \`agy models\`, then fix --model / the tier_* / default_model option." >&2
-      signal MODEL_UNAVAILABLE "model not in \`agy models\` (check --model / tier remaps)"; exit 14 ;;
   esac
   shopt -u nocasematch
+  if model_unavailable_blob "$blob"; then
+    # agy >= 1.1.2 hard-fails (instead of silently downgrading) when --model can't be
+    # resolved — common when a tier_* / default_model remap points at a model this plan
+    # doesn't expose. Surface it as its own actionable category. The patterns live in
+    # model_unavailable_blob(), shared with the pro-tier fallback trigger above.
+    echo "agy-delegate: model '$MODEL' is not available on this plan — run \`agy models\`, then fix --model / the tier_* / default_model option." >&2
+    signal MODEL_UNAVAILABLE "model not in \`agy models\` (check --model / tier remaps)"; exit 14
+  fi
   signal AGY_FAILED "agy exited $RC"
   exit 2
 fi

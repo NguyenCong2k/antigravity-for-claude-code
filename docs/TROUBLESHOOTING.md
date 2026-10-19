@@ -163,11 +163,11 @@ On classifiable failures the wrapper prints a machine-readable line to stderr:
 | 1 | usage error | check flags (`agy-delegate --help`) |
 | 2 | agy failed (unclassified) | read the stderr it relayed |
 | 3 | agy returned empty output | retry; check model availability (`agy models`). Before agy 1.1.18 a dropped agent stream also landed here as a false clean success; from 1.1.18 it exits non-zero (exit 2 here) — per agy's changelog, not reproduced |
-| 10 | quota / rate limit | wait, then resume the same conversation with `--continue` |
+| 10 | quota / rate limit (incl. Google AI credits / spend-cap exhaustion on agy ≥ 1.2.12) | wait or top up credits / raise spend cap, then resume the same conversation with `--continue` |
 | 11 | not authenticated | run `agy` once interactively to sign in |
 | 12 | timeout (agy's own, the wall-clock guard, or — agy 1.1.28+ — a `--print-timeout` that expired mid-turn: agy returns the **partial** reply with rc 0 and the wrapper prints it, then exits 12) | raise `--timeout`, narrow the task, or `--continue` the same conversation; on Windows see the hang section above |
 | 13 | agy not on PATH | install the Antigravity CLI |
-| 14 | model unavailable | the `--model` / `tier_*` / `default_model` name isn't in `agy models` (agy ≥ 1.1.2 hard-fails instead of silently downgrading) — run `agy models` and fix the name |
+| 14 | model unavailable | the `--model` / `tier_*` / `default_model` name isn't in `agy models` (agy ≥ 1.1.2 hard-fails instead of silently downgrading; an unremapped `--tier pro` first tries falling back to `Gemini 3.1 Pro` / `Gemini 3.1 Pro (High)` and logs `agy-delegate: pro fell back to …` on stderr) — run `agy models` and fix the name |
 | 15 | permission denied | a tool needed permission headless — **both** shapes: the soft deny (rc 0, empty stdout, `auto-denied` on stderr — agy 1.1.3+, and again from 1.1.20, measured on 1.1.25) and 1.1.13's hard error (rc 1, `user denied permission`); since 1.1.27 the tool is also named in the envelope's `denied_actions` (measured on 1.2.0). Add a `permissions.allow` rule covering the target, or pass `--yolo`; run on a branch |
 | 16 | python3 not on PATH (`agy-migrate` only) | install python3 (`brew install python3`) |
 | 17 | one or more migration steps failed (`agy-migrate` only) | read the named steps; the run is still revertible with `agy-migrate --uninstall --apply` |
