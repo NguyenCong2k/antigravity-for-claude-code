@@ -48,12 +48,14 @@ job_state() {
   fi
 }
 
-# Human label for a delegate exit code (mirrors agy-delegate.sh structured codes).
+# Human label for a delegate / hand-off exit code (mirrors agy-delegate.sh / agy-handoff.sh codes).
 rc_label() {
   case "$1" in
     0)  echo 'ok' ;;
     2)  echo 'agy failed' ;;
     3)  echo 'empty output' ;;
+    4)  echo 'VERIFY failed — tests still red after the allowed fix-ups (agy-handoff)' ;;
+    6)  echo 'TESTS modified — a protected --tests file was edited by the executor (agy-handoff)' ;;
     10) echo 'QUOTA — retry later with --continue' ;;
     11) echo 'AUTH required — run `agy` once interactively' ;;
     12) echo 'TIMEOUT — raise --timeout or narrow scope (agy 1.1.28+: the PARTIAL reply is in the output; --continue resumes the conversation)' ;;

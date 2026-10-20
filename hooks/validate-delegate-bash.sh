@@ -42,7 +42,7 @@ set -uo pipefail
 
 input="$(cat)"
 
-BLOCK_MSG="[antigravity-delegate] blocked: this subagent may only run agy-delegate / agy-job, as a BARE name with no path and no pipeline. No other commands, pipes, chaining, redirection, substitution, comments, or unquoted newlines. To give agy a repository, pass --dir <repo-root> rather than piping content in. Delegate file work to agy; verification is the caller's job."
+BLOCK_MSG="[antigravity-delegate] blocked: this subagent may only run agy-delegate / agy-job / agy-handoff, as a BARE name with no path and no pipeline (and for agy-handoff, without --verify or --no-verify). No other commands, pipes, chaining, redirection, substitution, comments, or unquoted newlines. To give agy a repository, pass --dir <repo-root> rather than piping content in. Delegate file work to agy; verification is the caller's job."
 
 # python3 gives a correct, quote-aware parse. Fail CLOSED if it's missing.
 if ! command -v python3 >/dev/null 2>&1; then
@@ -68,7 +68,7 @@ if not isinstance(cmd, str) or not cmd.strip():
 # `agy-delegate "hi\n` strips to `agy-delegate "hi`, which is still unbalanced.
 cmd = cmd.strip()
 
-WRAPPERS = {"agy-delegate", "agy-job"}
+WRAPPERS = {"agy-delegate", "agy-job", "agy-handoff"}
 
 # Say WHY, on stderr, so the caller can self-correct (issue #51). Claude Code feeds
 # PreToolUse stderr back to the agent, which is the same path BLOCK_MSG already takes.
@@ -162,12 +162,11 @@ segs, bad = scan(cmd)
 if segs is None or bad:
     deny(bad)
 
-def head(seg):
+def tokens(seg):
     try:
-        toks = shlex.split(seg)
+        return shlex.split(seg)
     except Exception:
         return None
-    return toks[0] if toks else None
 
 if len(segs) != 1:
     deny("a pipeline (%d pipe%s). No command may feed the wrapper: `git` with arbitrary "
@@ -176,11 +175,24 @@ if len(segs) != 1:
          "Pass `--dir <repo-root>` and let agy read the repository itself."
          % (len(segs) - 1, "" if len(segs) == 2 else "s"))
 
-t = head(segs[0])
-if not t:
+toks = tokens(segs[0])
+if not toks:
     deny("the command could not be tokenised")
-if base(t) not in WRAPPERS:
-    deny("the first command is not agy-delegate or agy-job")
+w = base(toks[0])
+if w not in WRAPPERS:
+    deny("the first command is not agy-delegate, agy-job or agy-handoff")
+if w == "agy-handoff":
+    for tok in toks[1:]:
+        if tok in ("--verify", "--no-verify") or tok.startswith("--verify="):
+            deny("%s is not allowed from the antigravity-delegate subagent: "
+                 "this blocks passing a direct command string to `bash -c` on the "
+                 "command line. Omit `--verify` so agy-handoff uses the repository's "
+                 "detected test target (go.mod / package.json / Cargo.toml / "
+                 "pyproject.toml / Makefile) — note that target is repository-controlled "
+                 "shell that the `--yolo` executor can edit (same untrusted-checkout "
+                 "boundary as SECURITY.md; tamper check and diff review are the guard), "
+                 "or run custom `--verify` from the main Claude session."
+                 % tok.split("=", 1)[0])
 sys.exit(0)
 PY
 then
