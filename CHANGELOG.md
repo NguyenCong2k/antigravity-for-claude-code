@@ -3,6 +3,16 @@
 All notable changes to **Antigravity for Claude Code**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## 0.30.2
+
+- **Full access support**: Added `--full-access` synonym for `--yolo` (`--dangerously-skip-permissions`) across `agy-delegate.sh` and userConfig option `full_access: true`.
+- **Compact JSON digest**: Added `--json-digest` and userConfig `json_digest: true` to return structured JSON digest (`status`, `filesChanged`, `commandsRun`, `testsSummary`, `failures`, `logPath`, `worktree`) for Claude Code, keeping full logs stored in dedicated log file.
+- **Dedicated worktree execution**: Added `--worktree <branch>` flag to run delegations concurrently in isolated git worktrees, preventing file conflict during multi-agent workflows.
+- **Incident logging**: Added `--incident-log <path>` option (and `INCIDENT_LOG` env) to record markdown incident entries on permissions denials, quota exhaustions, timeouts, and process terminations.
+- **Job status with PID and timestamp**: `agy-job status <id>` now outputs `status: running|done|failed`, `pid: <pid>`, and `last_output: <timestamp>` without dumping stdout logs.
+- **Doctor GCP configuration**: `agy-doctor` now reports GCP project, region, and default model, gracefully printing "chưa cấu hình" when unset.
+- **Context optimization**: Reduced `SessionStart` policy context overhead to ≤ 3 lines, added `inject_policy: off` userConfig, and made delegation nudge opt-in by default (`CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=off`).
+
 ## 0.30.1
 
 - **`agy-job cancel` now stops agy, not only the wrapper.** It killed the job's direct
