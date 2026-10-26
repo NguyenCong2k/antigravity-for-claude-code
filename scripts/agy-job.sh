@@ -47,7 +47,7 @@ alive() {
 # anything is killed: once a parent dies its children are reparented to PID 1 and can no
 # longer be found from the job's pid.
 descendants() {
-  ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+  { ps -A -o pid= -o ppid= 2>/dev/null || ps -l 2>/dev/null | awk 'NR>1 {print $1, $2}'; } | awk -v root="$1" '
     { kids[$2] = kids[$2] " " $1 }
     END {
       q = root
@@ -101,9 +101,17 @@ case "$cmd" in
     [ -x "$DELEGATE" ] || die "delegate not executable: $DELEGATE"
     id="$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}"
     jd="$REG/$id"; mkdir -p "$jd"
-    { echo "id=$id"; echo "cwd=$PWD"; echo "started=$(date -u +%FT%TZ 2>/dev/null || date)";
-      echo "task=$(printf '%s' "${!#}" | tr '\n' ' ' | cut -c1-200)"; } > "$jd/meta"
-    ( nohup "$DELEGATE" "$@" >"$jd/out" 2>"$jd/err"; echo $? >"$jd/rc" ) >/dev/null 2>&1 &
+    if [ "${!#:-}" = "-" ]; then
+      cat > "$jd/prompt"
+      task_desc="$(head -n 5 "$jd/prompt" | tr '\n' ' ' | cut -c1-200)"
+      { echo "id=$id"; echo "cwd=$PWD"; echo "started=$(date -u +%FT%TZ 2>/dev/null || date)";
+        echo "task=${task_desc:-stdin}"; } > "$jd/meta"
+      ( nohup "$DELEGATE" "$@" < "$jd/prompt" >"$jd/out" 2>"$jd/err"; echo $? >"$jd/rc"; rm -f "$jd/prompt" ) >/dev/null 2>&1 &
+    else
+      { echo "id=$id"; echo "cwd=$PWD"; echo "started=$(date -u +%FT%TZ 2>/dev/null || date)";
+        echo "task=$(printf '%s' "${!#}" | tr '\n' ' ' | cut -c1-200)"; } > "$jd/meta"
+      ( nohup "$DELEGATE" "$@" >"$jd/out" 2>"$jd/err"; echo $? >"$jd/rc" ) >/dev/null 2>&1 &
+    fi
     echo $! > "$jd/pid"
     disown 2>/dev/null || true
     echo "$id"
@@ -125,6 +133,15 @@ case "$cmd" in
   status)
     jd="$(jobdir "${1:-}")" || exit 1; st="$(job_state "$jd")"
     rc="$(cat "$jd/rc" 2>/dev/null || true)"
+    pid="$(cat "$jd/pid" 2>/dev/null || echo '')"
+    last_output=""
+    if [ -f "$jd/out" ]; then
+      last_output="$(date -u -r "$jd/out" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || stat -c %y "$jd/out" 2>/dev/null || echo '')"
+    fi
+    [ -z "$last_output" ] && last_output="$(sed -n 's/^started=//p' "$jd/meta" 2>/dev/null || echo 'unknown')"
+    echo "status:      $st"
+    [ -n "$pid" ] && echo "pid:         $pid"
+    echo "last_output: $last_output"
     echo "job:    $(basename "$jd")"
     sed 's/^/  /' "$jd/meta" 2>/dev/null
     if [ -n "$rc" ]; then echo "  state=$st (rc=$rc: $(rc_label "$rc"))"; else echo "  state=$st"; fi
@@ -148,6 +165,23 @@ case "$cmd" in
       # they kept running (a hand-off's --yolo executor kept editing the repository).
       # shellcheck disable=SC2046  # one pid per word is the point
       kill "$pid" $(descendants "$pid") 2>/dev/null || true
+      ilog="${INCIDENT_LOG:-${CLAUDE_PLUGIN_OPTION_INCIDENT_LOG:-}}"
+      if [ "${2:-}" = "--incident-log" ] && [ -n "${3:-}" ]; then
+        ilog="$3"
+      fi
+      if [ -n "$ilog" ]; then
+        utctime="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u)"
+        mkdir -p "$(dirname "$ilog")" 2>/dev/null || true
+        cat >> "$ilog" <<EOF
+
+## $utctime — agy — agy-job cancel $1
+- Loại: killed_process
+- Đã làm: agy-job cancel $1
+- Kết quả: process $pid killed
+- Xử lý: terminated process tree
+- Gợi ý sửa: job cancelled by caller
+EOF
+      fi
       echo "cancelled $(basename "$jd")"
     else
       echo "not running"

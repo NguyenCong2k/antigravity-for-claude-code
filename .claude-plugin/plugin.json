@@ -37,6 +37,18 @@
       "description": "When on (true), agy runs with --dangerously-skip-permissions (--full-access/--yolo), allowing tools, file writes, loopback network, and process execution without confirmation. Set to off/false/0/no to require explicit flags or permissions.allow rules.",
       "default": "off"
     },
+    "json_digest": {
+      "type": "string",
+      "title": "Output compact JSON digest for Claude",
+      "description": "When on (true), agy-delegate prints a compact JSON digest (status, filesChanged, commandsRun, testsSummary, failures, logPath, worktree) instead of full output, keeping full logs in a file. Set to off/false/0/no to output text.",
+      "default": "off"
+    },
+    "incident_log": {
+      "type": "string",
+      "title": "Incident log file path",
+      "description": "Path to markdown file where errors, blocks, timeouts, and killed processes are appended. Env INCIDENT_LOG overrides this.",
+      "default": ""
+    },
     "inject_policy": {
       "type": "string",
       "title": "Inject routing policy at session start and compact",
