@@ -57,13 +57,16 @@ command except the delegation wrapper** (`agy-delegate` / `agy-job` / `agy-hando
 `--verify` and `--no-verify` blocked on `agy-handoff` so you cannot supply a command-line
 `bash -c` string; note `agy-handoff` still runs the target repository's detected test target
 and invokes `agy` with `--yolo`). The gate also blocks `$VAR` / `${...}` expansion, unquoted
-or in double quotes, so write the task in single quotes or escape a literal dollar as `\$`.
+or in double quotes, so pass the task via stdin heredoc (`- <<'TASK'`), in single quotes, or escape a literal dollar as `\$`.
 So all
 file creation/editing and bulky work must be performed by agy, not by you — you
 cannot write files even via the shell. Never reconstruct file contents in your reply.
 
 ```bash
-agy-delegate [options] "<task>"
+agy-delegate [options] - <<'TASK'
+<task>
+TASK
+# or: agy-delegate [options] '<task>'
 ```
 
 Options: `--tier flash|flash-lo|pro` · `--dir <repo-root>` (so agy reads

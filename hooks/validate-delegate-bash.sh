@@ -57,7 +57,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 if AGY_GATE_INPUT="$input" python3 - <<'PY'
-import json, os, shlex, sys
+import json, os, re, shlex, sys
 
 raw = os.environ.get("AGY_GATE_INPUT", "")
 try:
@@ -178,6 +178,29 @@ def scan(s):
         return None, ("an unterminated %s quote" %
                       ("single" if st == "S" else "double"))
     return segs, bad
+
+# Top-level subshell assignment: ID=$(<cmd>)
+m_assign = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)=\\?\$\(([\s\S]*)\)$', cmd)
+if m_assign:
+    cmd = m_assign.group(2).strip()
+
+# Stdin heredoc with quoted delimiter: <<'DELIM' or <<"DELIM" or <<- 'DELIM'
+first_line = cmd.split('\n')[0]
+m_here = re.search(r'<<-?\s*(?:\'([^\']+)\'|"([^"]+)")', first_line)
+if m_here:
+    delim = m_here.group(1) or m_here.group(2)
+    lines = cmd.split('\n')
+    delim_idx = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == delim:
+            delim_idx = idx
+            break
+    if delim_idx is None:
+        deny("an unterminated stdin heredoc (missing closing '%s')" % delim)
+    trailing = '\n'.join(lines[delim_idx+1:]).strip()
+    if trailing:
+        deny("unexpected commands or content after stdin heredoc delimiter")
+    cmd = (first_line[:m_here.start()] + first_line[m_here.end():]).strip()
 
 segs, bad = scan(cmd)
 if segs is None or bad:

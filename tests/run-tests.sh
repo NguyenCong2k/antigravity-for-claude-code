@@ -1051,6 +1051,17 @@ check "gate blocks an ESCAPED backslash then a bare newline" 2 "$(gate_rc '"agy-
 # Stripping must not rescue an unterminated quote.
 check "stripping does not rescue an unbalanced quote" 2 "$(gate_rc '"agy-delegate \"hi\n"')" "" ""
 
+# heredoc and top-level subshell assignment
+heredoc_cmd=$(printf 'agy-delegate --tier flash - <<\x27TASK\x27\nhello world\nTASK')
+check "gate allows stdin heredoc with single-quoted delimiter" 0 "$(gate_path_rc "$heredoc_cmd")"
+check "gate allows top-level subshell assignment" 0 "$(gate_path_rc 'ID=$(agy-job status 123)')"
+subshell_heredoc_cmd=$(printf 'ID=$(agy-job start --tier pro --dir . - <<\x27TASK\x27\nmy task\nTASK\n)')
+check "gate allows top-level subshell assignment with heredoc" 0 "$(gate_path_rc "$subshell_heredoc_cmd")"
+unterminated_cmd=$(printf 'agy-delegate - <<\x27TASK\x27\nhello world')
+check "gate blocks unterminated stdin heredoc" 2 "$(gate_path_rc "$unterminated_cmd")"
+trailing_cmd=$(printf 'agy-delegate - <<\x27TASK\x27\nhello\nTASK\nevil')
+check "gate blocks command after heredoc delimiter" 2 "$(gate_path_rc "$trailing_cmd")"
+
 # The reason has to name the cause, or the message is no better than before.
 check "reason names the newline"        0 0 "unquoted newline"        "$(gate_why '"agy-delegate\n  \"hi\""')"
 check "reason offers the remedy"        0 0 "backslash"               "$(gate_why '"agy-delegate\n  \"hi\""')"
