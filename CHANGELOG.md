@@ -3,6 +3,20 @@
 All notable changes to **Antigravity for Claude Code**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## 0.30.1
+
+- **`agy-job cancel` now stops agy, not only the wrapper.** It killed the job's direct
+  children (`pkill -P`), which reached `agy-delegate` but not `timeout` and `agy` under it —
+  GNU `timeout` runs in its own process group — so a cancelled delegation kept running until
+  its own timeout, and a cancelled `agy-handoff --background` kept its `--yolo` executor
+  editing the repository. Cancel now kills the whole process tree, collected before the
+  first kill. `status` also stops reporting a cancelled job as `running` where PID 1 does not
+  reap orphans (a container without an init): `kill -0` succeeds on a zombie, so the check now
+  reads the process state too.
+- Tests: the unwritable-`AGY_USAGE_LOG` case used `/nonexistent-dir/x.log`, which root can
+  create since #103 made the parent directory on demand — the suite failed when run as root
+  and left a directory in `/`. It now points under a regular file.
+
 ## 0.30.0
 
 - **Hand-off mode: `agy-handoff` and `/antigravity:handoff`.** The one delegation shape

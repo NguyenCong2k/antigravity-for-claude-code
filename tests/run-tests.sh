@@ -95,6 +95,7 @@ has() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/agy" <<'STUB'
 #!/usr/bin/env bash
+[ -n "${STUB_PIDFILE:-}" ] && echo $$ > "$STUB_PIDFILE"
 [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
 # `agy models` emits the slug format agy 1.1.5+ uses (was display names before) so doctor's
 # tier-model check is exercised against the current format.
@@ -428,17 +429,21 @@ if [ "$(grep -c '^AGY_SIGNAL ' "$ULOG")" -eq 2 ]; then
   echo "ok: AGY_USAGE_LOG appends, does not truncate"; PASS=$((PASS+1));
 else echo "FAIL: AGY_USAGE_LOG truncated a previous entry"; FAIL=$((FAIL+1)); fi
 # Measurement must never break the work: an unwritable path is non-fatal.
-out=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_ok AGY_USAGE_LOG=/nonexistent-dir/x.log "$DELEGATE" "hi" 2>/dev/null); rc=$?
+# The parent is a regular FILE, not a missing directory: since #103 a missing parent is
+# created, so `/nonexistent-dir/x.log` is writable for root (a container, a CI sandbox) —
+# the test failed there and left a directory in /.
+: > "$TMP/usage-not-a-dir"; BADLOG="$TMP/usage-not-a-dir/x.log"
+out=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_ok AGY_USAGE_LOG="$BADLOG" "$DELEGATE" "hi" 2>/dev/null); rc=$?
 check "unwritable AGY_USAGE_LOG is non-fatal" 0 "$rc" "" "$out"
 # ...and non-fatal is not enough: it must also be SILENT. Redirections apply left to
 # right, so `>>"$f" 2>/dev/null` attempts the append while stderr is still real stderr
 # and leaks a bash redirection error on every call. Asserting only on the exit code
 # misses that entirely — check stderr itself.
-err=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_ok AGY_USAGE_LOG=/nonexistent-dir/x.log "$DELEGATE" "hi" 2>&1 >/dev/null)
+err=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_ok AGY_USAGE_LOG="$BADLOG" "$DELEGATE" "hi" 2>&1 >/dev/null)
 if grep -qiE 'No such file or directory|Permission denied' <<<"$err"; then
   echo "FAIL: unwritable AGY_USAGE_LOG leaks a redirection error to stderr"; FAIL=$((FAIL+1));
 else echo "ok: unwritable AGY_USAGE_LOG is silent, not just non-fatal"; PASS=$((PASS+1)); fi
-check "unwritable AGY_USAGE_LOG emits a one-line notice (#103)" 0 0 "usage log not writable: /nonexistent-dir/x.log" "$err"
+check "unwritable AGY_USAGE_LOG emits a one-line notice (#103)" 0 0 "usage log not writable: $BADLOG" "$err"
 # Off by default: no file is created when the option is unset.
 rm -f "$ULOG"
 STUB_JSON_CAPABLE=1 STUB_MODE=json_ok "$DELEGATE" "hi" >/dev/null 2>&1
@@ -1970,6 +1975,16 @@ out=$("$JOB" status "$cid" 2>/dev/null)
 if grep -q "state=running" <<<"$out"; then
   echo "FAIL: job cancel (still running)"; FAIL=$((FAIL+1))
 else echo "ok: job cancel stops it"; PASS=$((PASS+1)); fi
+# ...and stops agy itself, not only the wrapper. `pkill -P` reached the direct child
+# (agy-delegate) while `timeout` and agy under it kept running — timeout sits in its own
+# process group. Checked through `ps`, since an orphan that has exited can stay a zombie.
+gone() { ! kill -0 "$1" 2>/dev/null || case "$(ps -o stat= -p "$1" 2>/dev/null)" in *Z*) true ;; *) false ;; esac; }
+cid=$(STUB_MODE=text STUB_SLEEP=10 STUB_PIDFILE="$TMP/stub-agy.pid" "$JOB" start --tier flash "long task" 2>/dev/null)
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/stub-agy.pid" ] && break; sleep 0.3; done
+"$JOB" cancel "$cid" >/dev/null 2>&1; sleep 0.5
+apid="$(cat "$TMP/stub-agy.pid" 2>/dev/null)"
+if [ -n "$apid" ] && gone "$apid"; then echo "ok: job cancel stops agy, not just the wrapper"; PASS=$((PASS+1));
+else echo "FAIL: job cancel left agy running (pid ${apid:-?})"; FAIL=$((FAIL+1)); kill "${apid:-0}" 2>/dev/null; fi
 
 # #96: an unknown id must NOT be reported as a failed job. `die` inside `$(jobdir ...)`
 # only left the subshell, so status/result/cancel carried on with jd="" and printed

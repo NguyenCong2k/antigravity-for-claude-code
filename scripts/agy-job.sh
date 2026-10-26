@@ -34,6 +34,33 @@ jobdir() {
   echo "$hits"
 }
 
+# `kill -0` succeeds on a ZOMBIE too. A cancelled job's runner is reparented to PID 1, and
+# where PID 1 does not reap (a container without an init, e.g. `docker run` without
+# --init) it stays a zombie for good — so `status` said `running` forever after a cancel.
+alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  case "$(ps -o stat= -p "$1" 2>/dev/null)" in *Z*) return 1 ;; esac
+  return 0
+}
+
+# Every descendant of pid $1, one per line. Collected from ONE `ps` snapshot BEFORE
+# anything is killed: once a parent dies its children are reparented to PID 1 and can no
+# longer be found from the job's pid.
+descendants() {
+  ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END {
+      q = root
+      while (q != "") {
+        n = split(q, cur, " "); q = ""
+        for (i = 1; i <= n; i++) {
+          m = split(kids[cur[i]], k, " ")
+          for (j = 1; j <= m; j++) { print k[j]; q = q " " k[j] }
+        }
+      }
+    }'
+}
+
 # echoes running | done | failed. (rc is read directly from the file by callers —
 # a global set here would NOT survive the `$(job_state ...)` command-substitution subshell.)
 job_state() {
@@ -41,7 +68,7 @@ job_state() {
   if [ -f "$jd/rc" ]; then
     rc="$(cat "$jd/rc")"
     if [ "$rc" = "0" ]; then echo "done"; else echo "failed"; fi
-  elif [ -f "$jd/pid" ] && kill -0 "$(cat "$jd/pid")" 2>/dev/null; then
+  elif [ -f "$jd/pid" ] && alive "$(cat "$jd/pid")"; then
     echo running
   else
     echo failed   # pid gone, no rc recorded = crashed/killed
@@ -115,9 +142,12 @@ case "$cmd" in
   cancel)
     jd="$(jobdir "${1:-}")" || exit 1
     pid="$(cat "$jd/pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      pkill -P "$pid" 2>/dev/null || true   # children (agy) first
-      kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ] && alive "$pid"; then
+      # The WHOLE tree, not just direct children: `pkill -P` reached the wrapper but not
+      # `timeout` and agy under it — GNU timeout puts itself in its own process group, so
+      # they kept running (a hand-off's --yolo executor kept editing the repository).
+      # shellcheck disable=SC2046  # one pid per word is the point
+      kill "$pid" $(descendants "$pid") 2>/dev/null || true
       echo "cancelled $(basename "$jd")"
     else
       echo "not running"
