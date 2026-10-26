@@ -234,15 +234,9 @@ brain = os.environ.get("AGY_BRAIN_DIR", os.path.expanduser("~/.gemini/antigravit
 conv_id = os.environ.get("DIGEST_CONV_ID", "")
 transcripts = []
 if conv_id and os.path.isdir(os.path.join(brain, conv_id)):
-    transcripts.append(os.path.join(brain, conv_id, ".system_generated", "logs", "transcript.jsonl"))
-else:
-    try:
-        import glob
-        all_t = sorted(glob.glob(os.path.join(brain, "*", ".system_generated", "logs", "transcript.jsonl")), key=os.path.getmtime, reverse=True)
-        if all_t:
-            transcripts.append(all_t[0])
-    except Exception:
-        pass
+    t_file = os.path.join(brain, conv_id, ".system_generated", "logs", "transcript.jsonl")
+    if os.path.isfile(t_file):
+        transcripts.append(t_file)
 
 for t_path in transcripts:
     if os.path.isfile(t_path):
@@ -763,6 +757,8 @@ PY
     if [ -n "$meta" ]; then
       # `status` is a bare enum with no quotes inside it, so sed is safe there.
       JSON_STATUS="$(printf '%s' "$meta" | sed -n 's/.*"status": *"\([^"]*\)".*/\1/p')"
+      JSON_CONV_ID="$(printf '%s' "$meta" | sed -n 's/.*"conversation_id": *"\([^"]*\)".*/\1/p')"
+      [ -n "$JSON_CONV_ID" ] && [ -z "$CONV_ID" ] && CONV_ID="$JSON_CONV_ID"
       JSON_ERROR="$(cat "$JERR" 2>/dev/null)"
       JSON_DENIED="$(cat "$JDEN" 2>/dev/null)"
       OUT="$(cat "$RESP" 2>/dev/null)"

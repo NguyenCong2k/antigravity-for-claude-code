@@ -693,6 +693,25 @@ else
   echo "FAIL: CLAUDE_PLUGIN_OPTION_JSON_DIGEST=true did not emit JSON digest: $jd_env_out"; FAIL=$((FAIL+1));
 fi
 
+# Finding 2: ensure unrelated transcripts from other brain sessions are not ingested into commandsRun
+FAKE_BRAIN="$TMP/fake-brain"
+mkdir -p "$FAKE_BRAIN/other_session/.system_generated/logs"
+printf '{"tool_calls":[{"function":{"arguments":{"CommandLine":"unrelated_secret_cmd"}}}]}\n' > "$FAKE_BRAIN/other_session/.system_generated/logs/transcript.jsonl"
+jd_leak_out=$(AGY_BRAIN_DIR="$FAKE_BRAIN" STUB_MODE=text "$DELEGATE" --json-digest "say hi" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d.get('commandsRun') == []" "$jd_leak_out" 2>/dev/null; then
+  echo "ok: commandsRun does not leak transcripts from unrelated brain sessions"; PASS=$((PASS+1));
+else
+  echo "FAIL: commandsRun leaked unrelated session transcript: $jd_leak_out"; FAIL=$((FAIL+1));
+fi
+mkdir -p "$FAKE_BRAIN/my_session/.system_generated/logs"
+printf '{"tool_calls":[{"function":{"arguments":{"CommandLine":"my_expected_cmd"}}}]}\n' > "$FAKE_BRAIN/my_session/.system_generated/logs/transcript.jsonl"
+jd_conv_out=$(AGY_BRAIN_DIR="$FAKE_BRAIN" STUB_MODE=text "$DELEGATE" --conversation my_session --json-digest "say hi" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert any(c.get('command') == 'my_expected_cmd' for c in d.get('commandsRun', []))" "$jd_conv_out" 2>/dev/null; then
+  echo "ok: commandsRun ingests transcript from active conversation ID"; PASS=$((PASS+1));
+else
+  echo "FAIL: commandsRun did not ingest transcript for active conversation: $jd_conv_out"; FAIL=$((FAIL+1));
+fi
+
 # --worktree creates a git worktree and includes worktree path in digest
 WT_REPO="$TMP/wt-repo"; mkdir -p "$WT_REPO"
 ( cd "$WT_REPO" && git init -q . && git config user.email t@t && git config user.name t && touch a.txt && git add a.txt && git commit -qm init ) >/dev/null 2>&1
