@@ -28,6 +28,12 @@
 #     prompts — command substitution inside double quotes is still blocked because
 #     bash would expand it). Leading/trailing whitespace is stripped first, so a
 #     trailing newline is fine; an internal one is two commands and stays blocked;
+#   * rejects PARAMETER EXPANSION (`$NAME`, `${...}`, `$1`, `$@`…) unquoted or inside
+#     double quotes. With pipelines gone, `printf %s "$SECRET" | agy-delegate -` is
+#     blocked, but `agy-delegate "summarise: $SECRET"` ships the same value to the same
+#     external model with no producer at all. Single quotes and `\$` stay literal and are
+#     allowed, and so is a `$` bash leaves alone (`$ `, a trailing `$`, `$'...'`). `$5` IS
+#     an expansion (positional 5), so a prompt quoting a price needs single quotes or `\$`;
 #   * fails CLOSED (block) if the JSON is unparseable or python3 is unavailable.
 #
 # On a block it prints the SPECIFIC reason to stderr before the generic message
@@ -42,7 +48,7 @@ set -uo pipefail
 
 input="$(cat)"
 
-BLOCK_MSG="[antigravity-delegate] blocked: this subagent may only run agy-delegate / agy-job / agy-handoff, as a BARE name with no path and no pipeline (and for agy-handoff, without --verify or --no-verify). No other commands, pipes, chaining, redirection, substitution, comments, or unquoted newlines. To give agy a repository, pass --dir <repo-root> rather than piping content in. Delegate file work to agy; verification is the caller's job."
+BLOCK_MSG="[antigravity-delegate] blocked: this subagent may only run agy-delegate / agy-job / agy-handoff, as a BARE name with no path and no pipeline (and for agy-handoff, without --verify or --no-verify). No other commands, pipes, chaining, redirection, substitution, \$VARIABLE expansion, comments, or unquoted newlines. To give agy a repository, pass --dir <repo-root> rather than piping content in. Delegate file work to agy; verification is the caller's job."
 
 # python3 gives a correct, quote-aware parse. Fail CLOSED if it's missing.
 if ! command -v python3 >/dev/null 2>&1; then
@@ -103,6 +109,18 @@ def base(tok):
         return None
     return tok[:-3] if tok.endswith(".sh") else tok
 
+# `$` starts a parameter expansion when bash would substitute something for it: a name,
+# `{`, a digit, or a special parameter. Anything else (`$ `, a trailing `$`, `$'`, `$"`)
+# bash leaves as text. `$(` is checked separately, before this.
+PARAM_START = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789{@*#?$!-")
+def expands(s, i):
+    return i + 1 < len(s) and s[i + 1] in PARAM_START
+
+PARAM_WHY = "a `$` parameter expansion (`$NAME`, `${...}`, `$1`…)"
+PARAM_HINT = (" bash substitutes the value, which then goes to the external model; an"
+              " environment variable is how a secret leaks. Put literal text in single"
+              " quotes, or escape the dollar as `\\$`.")
+
 # Quote-aware scan: split into pipeline segments on UNQUOTED '|', and flag any
 # unquoted metacharacter bash would act on (plus command substitution inside "").
 def scan(s):
@@ -126,6 +144,7 @@ def scan(s):
             if c == "`":  bad = flag("backtick command substitution", i); cur.append(c); i += 1; continue
             if c == "$":
                 if i + 1 < n and s[i + 1] == "(": bad = flag("`$(` command substitution", i)
+                elif expands(s, i): bad = flag(PARAM_WHY, i, PARAM_HINT)
                 cur.append(c); i += 1; continue
             if c == "\n":
                 bad = flag("an unquoted newline", i,
@@ -150,6 +169,8 @@ def scan(s):
             if i + 1 < n and s[i + 1] == "(":
                 bad = flag("`$(` command substitution inside double quotes "
                            "(bash still expands it)", i)
+            elif expands(s, i):
+                bad = flag(PARAM_WHY + " inside double quotes (bash still expands it)", i, PARAM_HINT)
             i += 1; continue
         i += 1
     segs.append("".join(cur))

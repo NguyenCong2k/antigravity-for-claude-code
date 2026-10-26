@@ -57,7 +57,9 @@ You have **no `Write` and no `Edit`**, and a `PreToolUse` gate **blocks every Ba
 command except the delegation wrapper** (`agy-delegate` / `agy-job` / `agy-handoff`, with
 `--verify` and `--no-verify` blocked on `agy-handoff` so you cannot supply a command-line
 `bash -c` string; note `agy-handoff` still runs the target repository's detected test target
-and invokes `agy` with `--yolo`). So all
+and invokes `agy` with `--yolo`). The gate also blocks `$VAR` / `${...}` expansion, unquoted
+or in double quotes, so write the task in single quotes or escape a literal dollar as `\$`.
+So all
 file creation/editing and bulky work must be performed by agy, not by you — you
 cannot write files even via the shell. Never reconstruct file contents in your reply.
 

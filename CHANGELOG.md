@@ -13,6 +13,16 @@ All notable changes to **Antigravity for Claude Code**. Format loosely follows
   first kill. `status` also stops reporting a cancelled job as `running` where PID 1 does not
   reap orphans (a container without an init): `kill -0` succeeds on a zombie, so the check now
   reads the process state too.
+- **The subagent gate blocks `$VAR` expansion.** With pipelines gone (GHSA-hwv2-vjgj-8rcv),
+  `printf %s "$SECRET" | agy-delegate -` was blocked, but `agy-delegate "summarise: $SECRET"`
+  sent the same value to the same external model and passed. `$NAME`, `${...}`, positional
+  and special parameters are now refused unquoted and inside double quotes, with a reason
+  that says to use single quotes or `\$`. Single-quoted text, `\$`, and a `$` bash leaves
+  alone are still allowed; the agent definition says so.
+- `agy-media`'s `--yolo` warning counted the file itself as a neighbour, and printed `0` twice
+  for an empty count (`grep -c` prints 0 and exits 1, so `|| echo 0` added a second).
+- Shellcheck is clean at `--severity=warning`; the intentional patterns in the tests
+  carry a disable comment with the reason.
 - Tests: the unwritable-`AGY_USAGE_LOG` case used `/nonexistent-dir/x.log`, which root can
   create since #103 made the parent directory on demand — the suite failed when run as root
   and left a directory in `/`. It now points under a regular file.

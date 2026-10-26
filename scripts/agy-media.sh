@@ -179,7 +179,12 @@ Transcript file: $OUT"
 # The same measurement corrected this warning. 0.25.0 said "--dir exposes $DIR", which
 # UNDERSTATES it: --dir is where agy looks first, not a boundary. --yolo approves every
 # tool, and agy then writes wherever it likes.
-NEIGHBOURS="$(ls -1 "$DIR" 2>/dev/null | grep -c . || echo 0)"
+# Counted with a glob, not `ls | grep -c .`: on zero matches `grep -c` prints 0 AND exits 1,
+# so `|| echo 0` printed a second 0. The file itself is not a neighbour.
+NEIGHBOURS=0
+for _e in "$DIR"/*; do
+  { [ -e "$_e" ] || [ -L "$_e" ]; } && [ "$_e" != "$DIR/$(basename "$FILE")" ] && NEIGHBOURS=$((NEIGHBOURS+1))
+done
 echo "agy-media: --yolo approves ALL agy tools for this run, including the terminal, so this is a grant over YOUR WHOLE MACHINE — not just $DIR ($NEIGHBOURS entr(y/ies) beside your file), which is only where agy starts looking. Measured: under --yolo, agy writes outside --dir and runs shell commands, and --sandbox does not change that. Run this on files you are willing to hand an unsupervised agent." >&2
 ARGS=(--tier "$TIER" --yolo --dir "$DIR" --timeout "$TIMEOUT")
 if [ "$PRINT_CMD" -eq 1 ]; then

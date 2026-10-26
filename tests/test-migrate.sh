@@ -37,7 +37,7 @@ unset PUB_CACHE UV_CACHE_DIR GOMODCACHE
 # --uninstall --apply runs hit the developer's real ~/.claude and ~/.gemini.
 unset CLAUDE_CONFIG_DIR
 if command -v cygpath >/dev/null 2>&1; then
-  export USERPROFILE="$(cygpath -w "$H")"
+  USERPROFILE="$(cygpath -w "$H")"; export USERPROFILE
 else
   export USERPROFILE="$H"
 fi
@@ -320,9 +320,11 @@ PY2
 # --include-repos so the claudemd unit lists paths instead of only a count.
 OUT="$(run --roots "$H" --include-repos)"
 if has "sibling-prefix-server" "$OUT"; then
+  # shellcheck disable=SC2088  # a label, not a path
   ok "~/.claude-pro is not pruned by the ~/.claude exclusion"
 else bad "a sibling sharing a prefix with an excluded root was pruned"; fi
 if has "Library-notes" "$OUT"; then
+  # shellcheck disable=SC2088  # a label, not a path
   ok "~/Library-notes is not pruned by the ~/Library exclusion"
 else bad "Library-notes was pruned"; fi
 rm -rf "$H/.claude-pro" "$H/Library-notes"
