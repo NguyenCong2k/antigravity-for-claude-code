@@ -1207,6 +1207,16 @@ if grep -q "tier model present: $DEF_FLASH" <<<"$out"; then
   echo "ok: doctor matches default flash tier in slug format"; PASS=$((PASS+1));
 else echo "FAIL: doctor did not confirm the default flash tier present"; FAIL=$((FAIL+1)); fi
 
+if grep -q "GCP project:" <<<"$out" && grep -q "GCP region:" <<<"$out" && grep -q "default model:" <<<"$out"; then
+  echo "ok: doctor reports GCP project, region, and default model"; PASS=$((PASS+1));
+else echo "FAIL: doctor missing GCP project/region/default model fields"; FAIL=$((FAIL+1)); fi
+
+# test unconfigured values report 'chưa cấu hình'
+doc_unconf="$(HOME="$TMP/emptyhome" bash "$ROOT/scripts/doctor.sh" 2>&1)"
+if grep -q "GCP project:   chưa cấu hình" <<<"$doc_unconf" && grep -q "GCP region:    chưa cấu hình" <<<"$doc_unconf"; then
+  echo "ok: doctor reports 'chưa cấu hình' when GCP config is absent"; PASS=$((PASS+1));
+else echo "FAIL: doctor did not report 'chưa cấu hình' for unconfigured GCP settings"; FAIL=$((FAIL+1)); fi
+
 # #102 & #104: two-column `agy models` (`<slug>  <display name>`) on agy 1.2.x-1.4.x.
 # Substring matching falsely passed "Gemini 4 Argon" against "Gemini 4 Argon (High)" (#102)
 # and "Gemini 3.1 Pro (High)" against `gemini-3.1-pro-high  Gemini 3.1 Pro` (#104).

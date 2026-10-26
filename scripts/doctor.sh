@@ -469,14 +469,31 @@ fi
 
 # 3. agy GCP config
 SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
+PROJ=""
+LOC=""
+MODEL_CFG=""
 if [ -f "$SETTINGS" ]; then
+  ok "agy settings: ${SETTINGS/#$HOME/~}"
   PROJ="$(sed -n 's/.*"project"[: ]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)"
   LOC="$(sed -n 's/.*"location"[: ]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)"
-  ok "agy settings: ${SETTINGS/#$HOME/~}"
-  [ -n "$PROJ" ] && info "GCP project: $PROJ   location: ${LOC:-?}"
-
+  [ -z "$LOC" ] && LOC="$(sed -n 's/.*"region"[: ]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)"
+  MODEL_CFG="$(sed -n 's/.*"model"[: ]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)"
 else
   info "no agy settings.json yet (${SETTINGS/#$HOME/~})"
+fi
+
+# Fallback to env vars if not in settings.json
+[ -z "$PROJ" ] && PROJ="${GOOGLE_CLOUD_PROJECT:-${CLOUDSDK_CORE_PROJECT:-${GCP_PROJECT:-}}}"
+[ -z "$LOC" ] && LOC="${CLOUDSDK_COMPUTE_REGION:-${GOOGLE_CLOUD_REGION:-}}"
+
+info "GCP project:   ${PROJ:-chưa cấu hình}"
+info "GCP region:    ${LOC:-chưa cấu hình}"
+if [ -n "$MODEL_CFG" ]; then
+  info "default model: $MODEL_CFG"
+elif [ -n "${CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL:-}" ]; then
+  info "default model: $CLAUDE_PLUGIN_OPTION_DEFAULT_MODEL"
+else
+  info "default model: chưa cấu hình"
 fi
 
 # 3b. permissions.allow entries agy cannot use as written.
