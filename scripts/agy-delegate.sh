@@ -37,6 +37,10 @@
 #   -c, --continue                   Resume the most recent agy conversation (stateful)
 #       --conversation <id>          Resume a specific agy conversation by ID (stateful)
 #   -m, --model <exact name>         Use an exact agy model (any from `agy models`: Gemini/Claude/GPT…)
+#       --worktree <branch>          Run in dedicated git worktree for concurrent isolation (implies --json-digest)
+#       --incident-log <path>        Append markdown incident entry on errors/blocks/timeouts
+#       --json-digest                Output compact JSON digest for Claude
+#       --log-path <path>            Full log output path (recorded in digest)
 #       --print-command              Print the resolved agy command and exit (dry run)
 #   -h, --help                       Show this help
 #
@@ -94,7 +98,15 @@ PROMPT=""
 CONTINUE=0
 CONV_ID=""
 PRINT_CMD=0
-DENIED_ACTIONS=""   # tool names from the envelope's denied_actions (agy 1.1.27+), for the message
+DENIED_ACTIONS=""
+WORKTREE_BRANCH=""
+WORKTREE_DIR=""
+INCIDENT_LOG="${INCIDENT_LOG:-${CLAUDE_PLUGIN_OPTION_INCIDENT_LOG:-}}"
+JSON_DIGEST=0
+LOG_PATH="${LOG_PATH:-}"
+case "$(printf '%s' "${CLAUDE_PLUGIN_OPTION_JSON_DIGEST:-off}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+  on|true|1|yes) JSON_DIGEST=1 ;;
+esac   # tool names from the envelope's denied_actions (agy 1.1.27+), for the message
 
 die() { echo "agy-delegate: $*" >&2; exit 1; }
 # $1 = remaining argc ($#). Fail with a friendly message if an option has no value
@@ -145,6 +157,172 @@ tee_usage() { # $1 = the full line, already formatted
     USAGE_LOG_WARNED=1
     echo "agy-delegate: usage log not writable: $USAGE_LOG" >&2
   fi
+}
+
+log_incident() { # $1=type $2=action $3=result $4=handling $5=suggestion
+  [ -n "$INCIDENT_LOG" ] || return 0
+  local utctime type="$1" action="$2" result="$3" handling="$4" suggestion="$5"
+  utctime="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u)"
+  mkdir -p "$(dirname "$INCIDENT_LOG")" 2>/dev/null || true
+  cat >> "$INCIDENT_LOG" <<EOF
+
+## $utctime — agy — ${action:-task}
+- Loại: $type
+- Đã làm: $action
+- Kết quả: $result
+- Xử lý: $handling
+- Gợi ý sửa: $suggestion
+EOF
+}
+
+ensure_log_path() {
+  if [ -z "$LOG_PATH" ]; then
+    local logdir="${ANTIGRAVITY_LOGS:-$HOME/.antigravity-jobs/logs}"
+    mkdir -p "$logdir" 2>/dev/null || true
+    LOG_PATH="$logdir/agy-$(date +%Y%m%d-%H%M%S)-$$.log"
+  else
+    mkdir -p "$(dirname "$LOG_PATH")" 2>/dev/null || true
+  fi
+}
+
+emit_digest_json() { # $1=status $2=exit_code
+  local st="$1" rc="${2:-0}"
+  ensure_log_path
+  {
+    echo "=== AGY DELEGATION LOG ==="
+    echo "Date: $(date -u 2>/dev/null || date)"
+    echo "Status: $st (rc=$rc)"
+    echo "Model: $MODEL (tier: ${USAGE_TIER:-none})"
+    echo "Prompt: $PROMPT"
+    echo "=== STDOUT ==="
+    cat "$OUTF" 2>/dev/null
+    echo "=== STDERR ==="
+    cat "$ERR" 2>/dev/null
+  } > "$LOG_PATH" 2>/dev/null || true
+
+  DIGEST_STATUS="$st" \
+  DIGEST_WORKTREE="${WORKTREE_DIR:-}" \
+  DIGEST_LOG_PATH="$LOG_PATH" \
+  DIGEST_ERR_FILE="$ERR" \
+  DIGEST_OUT_FILE="$OUTF" \
+  DIGEST_TARGET_DIR="${WORKTREE_DIR:-$PWD}" \
+  DIGEST_CONV_ID="${CONV_ID:-}" \
+  python3 - <<'PY'
+import json, os, subprocess, sys
+
+status = os.environ.get("DIGEST_STATUS", "passed")
+worktree = os.environ.get("DIGEST_WORKTREE", "")
+log_path = os.environ.get("DIGEST_LOG_PATH", "")
+err_file = os.environ.get("DIGEST_ERR_FILE", "")
+out_file = os.environ.get("DIGEST_OUT_FILE", "")
+target_dir = os.environ.get("DIGEST_TARGET_DIR", os.getcwd())
+
+files_changed = []
+try:
+    proc = subprocess.run(["git", "status", "--porcelain"], cwd=target_dir, capture_output=True, text=True, errors="replace")
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            fn = line[2:].strip().strip('"')
+            if fn and fn not in files_changed:
+                files_changed.append(fn)
+except Exception:
+    pass
+
+commands_run = []
+brain = os.environ.get("AGY_BRAIN_DIR", os.path.expanduser("~/.gemini/antigravity-cli/brain"))
+conv_id = os.environ.get("DIGEST_CONV_ID", "")
+transcripts = []
+if conv_id and os.path.isdir(os.path.join(brain, conv_id)):
+    transcripts.append(os.path.join(brain, conv_id, ".system_generated", "logs", "transcript.jsonl"))
+else:
+    try:
+        import glob
+        all_t = sorted(glob.glob(os.path.join(brain, "*", ".system_generated", "logs", "transcript.jsonl")), key=os.path.getmtime, reverse=True)
+        if all_t:
+            transcripts.append(all_t[0])
+    except Exception:
+        pass
+
+for t_path in transcripts:
+    if os.path.isfile(t_path):
+        try:
+            with open(t_path, encoding="utf-8", errors="replace") as fh:
+                for l in fh:
+                    l = l.strip()
+                    if not l: continue
+                    d = json.loads(l)
+                    for tc in d.get("tool_calls", []):
+                        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                        args = fn.get("arguments", {})
+                        if isinstance(args, str):
+                            try: args = json.loads(args)
+                            except Exception: args = {}
+                        cmd_str = args.get("CommandLine") or args.get("command")
+                        if cmd_str:
+                            commands_run.append({"command": cmd_str, "exitCode": d.get("exit_code", 0)})
+        except Exception:
+            pass
+        break
+
+tests_summary = ""
+content_to_scan = ""
+if out_file and os.path.isfile(out_file):
+    try:
+        with open(out_file, encoding="utf-8", errors="replace") as fh:
+            content_to_scan += fh.read()
+    except Exception:
+        pass
+if err_file and os.path.isfile(err_file):
+    try:
+        with open(err_file, encoding="utf-8", errors="replace") as fh:
+            content_to_scan += fh.read()
+    except Exception:
+        pass
+
+import re
+m = re.search(r'(PASS=\d+ FAIL=\d+.*|(\d+) passed, (\d+) failed.*|test result: .*)', content_to_scan)
+if m:
+    tests_summary = m.group(1).strip()
+
+failures = []
+if err_file and os.path.isfile(err_file):
+    try:
+        with open(err_file, encoding="utf-8", errors="replace") as fh:
+            for l in fh:
+                line = l.rstrip()
+                if line and not line.startswith("AGY_USAGE ") and not line.startswith("AGY_SIGNAL "):
+                    failures.append(line)
+                if len(failures) >= 40:
+                    break
+    except Exception:
+        pass
+
+if status != "passed" and not failures and out_file and os.path.isfile(out_file):
+    try:
+        with open(out_file, encoding="utf-8", errors="replace") as fh:
+            for l in fh:
+                line = l.rstrip()
+                if line:
+                    failures.append(line)
+                if len(failures) >= 40:
+                    break
+    except Exception:
+        pass
+
+digest = {
+    "status": status,
+    "filesChanged": files_changed,
+    "commandsRun": commands_run,
+    "testsSummary": tests_summary,
+    "failures": failures[:40],
+    "logPath": log_path
+}
+if worktree:
+    digest["worktree"] = worktree
+
+print(json.dumps(digest, indent=2, ensure_ascii=False))
+PY
 }
 
 # Emit a one-line machine-readable failure signal to stderr. $1=status $2=reason.
@@ -205,6 +383,8 @@ permission_denied() {   # $1 = "shown" when the caller already echoed $ERR
   fi
   echo "agy-delegate: agy denied a tool that needs permission (headless can't prompt)${DENIED_ACTIONS:+ — denied: $DENIED_ACTIONS} — the denied action was not performed. For a FILE WRITE, the narrower fix is a permissions.allow rule covering the target in ~/.gemini/antigravity-cli/settings.json — write_file(<dir>) matches recursively beneath <dir> — which needs no flag; --yolo also works but auto-approves ALL tools. For a URL READ the rule is read_url(<target>) — agy 1.1.28 made fetching URLs ask first, so headless it is denied without one. Other tools (web search / Vertex AI Search / terminal) need --yolo unless a rule covers them. \`--mode accept-edits\` is NOT a write grant: measured on agy 1.1.13 it is denied exactly like a plain write. agy's own message above names the specific permission it wanted. If a rule is ALREADY in place and you are still reading this, suspect the rule: run agy-doctor, because an entry agy cannot parse grants nothing. (A command(...) rule naming no command ALSO auto-approved everything before agy 1.1.11; a mistyped write_file() never did.)" >&2
   signal PERMISSION_DENIED "agy denied a permissioned tool in headless${DENIED_ACTIONS:+ (denied: $DENIED_ACTIONS)} — add a permissions.allow rule or pass --yolo"
+  log_incident "permission_denied" "${PROMPT:0:80}" "agy denied permissioned tool (exit 15)${DENIED_ACTIONS:+: $DENIED_ACTIONS}" "stopped execution" "run with --full-access or add permissions.allow rule"
+  if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "blocked" 15; fi
   exit 15
 }
 
@@ -282,6 +462,10 @@ while [ $# -gt 0 ]; do
     -c|--continue)  CONTINUE=1; shift ;;            # resume most recent agy conversation
     --conversation) need "$#" "$1"; CONV_ID="$2"; shift 2 ;; # resume a specific conversation by ID
     -m|--model)     need "$#" "$1"; MODEL="$2"; shift 2 ;;
+    --worktree)     need "$#" "$1"; WORKTREE_BRANCH="$2"; JSON_DIGEST=1; shift 2 ;;
+    --incident-log) need "$#" "$1"; INCIDENT_LOG="$2"; shift 2 ;;
+    --json-digest)  JSON_DIGEST=1; shift ;;
+    --log-path)     need "$#" "$1"; LOG_PATH="$2"; shift 2 ;;
     --print-command) PRINT_CMD=1; shift ;;          # dry run: show the resolved agy command
     -h|--help)      usage ;;
     -)              PROMPT="$(cat)"; shift ;;       # read prompt from stdin
@@ -292,6 +476,25 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PROMPT" ] || die "no prompt given (pass a string, or '-' to read stdin)"
+
+if [ -n "$WORKTREE_BRANCH" ]; then
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "--worktree requires a git repository"
+  fi
+  REPO_ROOT="$(git rev-parse --show-toplevel)"
+  WORKTREE_DIR="$REPO_ROOT/.worktrees/$WORKTREE_BRANCH"
+  mkdir -p "$(dirname "$WORKTREE_DIR")"
+  if [ -d "$WORKTREE_DIR" ]; then
+    if ! git -C "$REPO_ROOT" worktree list 2>/dev/null | grep -qF "$WORKTREE_DIR"; then
+      rm -rf "$WORKTREE_DIR"
+      git -C "$REPO_ROOT" worktree add -B "$WORKTREE_BRANCH" "$WORKTREE_DIR" HEAD >/dev/null 2>&1
+    fi
+  else
+    git -C "$REPO_ROOT" worktree add -B "$WORKTREE_BRANCH" "$WORKTREE_DIR" HEAD >/dev/null 2>&1
+  fi
+  ADD_DIRS+=("$WORKTREE_DIR")
+  cd "$WORKTREE_DIR"
+fi
 # --print-command is a dry run (introspection), so it doesn't require agy on PATH.
 if [ "$PRINT_CMD" -ne 1 ] && ! command -v agy >/dev/null 2>&1; then
   echo "agy-delegate: 'agy' not found on PATH — install the Antigravity CLI first" >&2
@@ -601,6 +804,8 @@ if [ -n "$TO_CMD" ] && { [ $RC -eq 124 ] || [ $RC -eq 137 ]; }; then
     echo "agy-delegate:   native Windows: agy needs a console (ConPTY); run delegation from WSL/macOS/Linux." >&2
   fi
   signal TIMEOUT "agy wall-clock guard fired after ${TO_SECS}s (headless/no-TTY hang?)"
+  log_incident "blocked" "${PROMPT:0:80}" "wall-clock guard timeout after ${TO_SECS}s" "terminated agy process" "raise --timeout or narrow task scope"
+  if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "blocked" 12; fi
   exit 12
 fi
 
@@ -634,6 +839,8 @@ if [ "$RC" -eq 0 ] && grep -qE 'print timeout after .*returning partial output' 
   usage_note=""; [ "$JSON_MODE" -eq 1 ] && usage_note=", so the AGY_USAGE line above undercounts"
   echo "agy-delegate: agy's --print-timeout ($TIMEOUT) expired mid-turn — the output above is PARTIAL (agy 1.1.28+ returns it with rc 0 and reports no usage for the turn${usage_note}). Raise --timeout or narrow the task; --continue resumes the same conversation." >&2
   signal TIMEOUT "agy print-timeout ($TIMEOUT) expired mid-turn — partial output printed to stdout"
+  log_incident "blocked" "${PROMPT:0:80}" "agy print-timeout expired mid-turn" "partial output returned" "raise --timeout or narrow scope"
+  if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "blocked" 12; fi
   exit 12
 fi
 
@@ -662,11 +869,23 @@ $blob"
     *"permission that headless"*|*"dangerously-skip-permissions"*)
       shopt -u nocasematch; permission_denied shown ;;
     *quota*|*"rate limit"*|*"resource exhausted"*|*"credits balance is too low"*|*"insufficient credits"*|*"spend cap"*)
-      shopt -u nocasematch; signal QUOTA_EXHAUSTED "agy quota / rate limit"; exit 10 ;;
+      shopt -u nocasematch
+      log_incident "blocked" "${PROMPT:0:80}" "quota / rate limit exceeded" "retry with --continue" "wait for quota reset"
+      signal QUOTA_EXHAUSTED "agy quota / rate limit"
+      if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "blocked" 10; fi
+      exit 10 ;;
     *unauthenticated*|*unauthorized*|*"sign in"*|*"please authenticate"*|*reauth*)
-      shopt -u nocasematch; signal AUTH_REQUIRED "agy not authenticated — run \`agy\` once"; exit 11 ;;
+      shopt -u nocasematch
+      log_incident "blocked" "${PROMPT:0:80}" "not authenticated" "prompted sign-in" "run agy interactively"
+      signal AUTH_REQUIRED "agy not authenticated — run \`agy\` once"
+      if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "blocked" 11; fi
+      exit 11 ;;
     *"timed out"*|*"deadline exceeded"*|*"print-timeout"*)
-      shopt -u nocasematch; signal TIMEOUT "agy print-timeout / deadline exceeded"; exit 12 ;;
+      shopt -u nocasematch
+      log_incident "blocked" "${PROMPT:0:80}" "print-timeout / deadline exceeded" "terminated turn" "raise --timeout"
+      signal TIMEOUT "agy print-timeout / deadline exceeded"
+      if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "blocked" 12; fi
+      exit 12 ;;
   esac
   shopt -u nocasematch
   if model_unavailable_blob "$blob"; then
@@ -675,9 +894,14 @@ $blob"
     # doesn't expose. Surface it as its own actionable category. The patterns live in
     # model_unavailable_blob(), shared with the pro-tier fallback trigger above.
     echo "agy-delegate: model '$MODEL' is not available on this plan — run \`agy models\`, then fix --model / the tier_* / default_model option." >&2
-    signal MODEL_UNAVAILABLE "model not in \`agy models\` (check --model / tier remaps)"; exit 14
+    log_incident "wrong_command" "${PROMPT:0:80}" "model unavailable: $MODEL" "exit 14" "check agy models"
+    signal MODEL_UNAVAILABLE "model not in \`agy models\` (check --model / tier remaps)"
+    if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "error" 14; fi
+    exit 14
   fi
+  log_incident "wrong_command" "${PROMPT:0:80}" "agy exited $RC" "exit 2" "inspect error logs"
   signal AGY_FAILED "agy exited $RC"
+  if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "failed" "$RC"; fi
   exit 2
 fi
 if [[ "$OUT" != *[!$' \t\n\r']* ]]; then   # same glob as above, not the quadratic strip
@@ -700,6 +924,8 @@ if [[ "$OUT" != *[!$' \t\n\r']* ]]; then   # same glob as above, not the quadrat
   esac
   shopt -u nocasematch
   echo "agy-delegate: agy returned empty output (model='$MODEL')" >&2
+  log_incident "wrong_command" "${PROMPT:0:80}" "agy returned empty output" "exit 3" "retry with more explicit prompt"
+  if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "failed" 3; fi
   exit 3
 fi
 
@@ -713,4 +939,8 @@ if [ "$WARN_CHARS" -gt 0 ] && [ "${#OUT}" -gt "$WARN_CHARS" ]; then
   echo "agy-delegate: note: output is ${#OUT} chars (> ${WARN_CHARS}) — that looks like a raw dump, not a digest. Don't ingest this into the conductor's context: re-run with --digest, or have agy summarize it first. (plugin option digest_warn_chars tunes this; 0 disables.)" >&2
 fi
 
-printf '%s\n' "$OUT"
+if [ "$JSON_DIGEST" -eq 1 ]; then
+  emit_digest_json "passed" 0
+else
+  printf '%s\n' "$OUT"
+fi
