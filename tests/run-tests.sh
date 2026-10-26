@@ -561,6 +561,19 @@ check "write prompt w/o --yolo -> warns" 0 "$rc" "$WARN" "$out"
 out=$(STUB_MODE=args "$DELEGATE" --yolo "implement the parser module" 2>&1); rc=$?
 if grep -qF "$WARN" <<<"$out"; then echo "FAIL: warned even with --yolo"; FAIL=$((FAIL+1));
 else echo "ok: no write-warning when --yolo is set"; PASS=$((PASS+1)); fi
+
+out=$(STUB_MODE=args "$DELEGATE" --full-access "implement the parser module" 2>&1); rc=$?
+if grep -qF "$WARN" <<<"$out"; then echo "FAIL: warned even with --full-access"; FAIL=$((FAIL+1));
+else echo "ok: no write-warning when --full-access is set"; PASS=$((PASS+1)); fi
+
+out=$(STUB_MODE=args CLAUDE_PLUGIN_OPTION_FULL_ACCESS=true "$DELEGATE" "implement the parser module" 2>&1); rc=$?
+if grep -qF "$WARN" <<<"$out"; then echo "FAIL: warned even with CLAUDE_PLUGIN_OPTION_FULL_ACCESS=true"; FAIL=$((FAIL+1));
+else echo "ok: no write-warning when full_access=true in userConfig"; PASS=$((PASS+1)); fi
+
+out=$("$DELEGATE" --print-command --full-access "hi" 2>/dev/null); rc=$?
+if grep -q -- "--dangerously-skip-permissions" <<<"$out"; then
+  echo "ok: --full-access passes --dangerously-skip-permissions to agy"; PASS=$((PASS+1));
+else echo "FAIL: --full-access did not pass --dangerously-skip-permissions: $out"; FAIL=$((FAIL+1)); fi
 out=$(STUB_MODE=args "$DELEGATE" --mode accept-edits "implement the parser module" 2>&1); rc=$?
 if grep -qF "$WARN" <<<"$out"; then echo "ok: --mode accept-edits still warns (it is not a grant on any version)"; PASS=$((PASS+1));
 else echo "FAIL: no warning with --mode accept-edits (should warn since 1.1.3)"; FAIL=$((FAIL+1)); fi

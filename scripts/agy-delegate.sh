@@ -23,7 +23,7 @@
 #   -t, --tier <flash|flash-lo|pro>  Model tier (default: flash)
 #   -d, --dir  <path>                Add a workspace dir (repeatable)
 #       --timeout <dur>              Print-mode timeout, e.g. 10m (default: 5m)
-#       --yolo                       Auto-approve all tool permissions (DANGEROUS). Reaches agy as
+#       --yolo, --full-access        Auto-approve all tool permissions (full access). Reaches agy as
 #                                    --dangerously-skip-permissions; agy 1.1.25 rejects a literal --yolo
 #       --sandbox                    Run agent with terminal sandbox restrictions
 #       --digest                     Append a digest-only output contract to the prompt
@@ -83,6 +83,9 @@ TIMEOUT="${CLAUDE_PLUGIN_OPTION_TIMEOUT:-5m}"
 TIER_EXPLICIT=0
 MODEL=""
 YOLO=0
+case "$(printf '%s' "${CLAUDE_PLUGIN_OPTION_FULL_ACCESS:-off}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+  on|true|1|yes) YOLO=1 ;;
+esac
 SANDBOX=0
 DIGEST=0
 MODE=""
@@ -269,7 +272,7 @@ while [ $# -gt 0 ]; do
     -t|--tier)      need "$#" "$1"; TIER="$2"; TIER_EXPLICIT=1; shift 2 ;;
     -d|--dir)       need "$#" "$1"; ADD_DIRS+=("$2"); shift 2 ;;
     --timeout)      need "$#" "$1"; TIMEOUT="$2"; shift 2 ;;
-    --yolo)         YOLO=1; shift ;;
+    --yolo|--full-access) YOLO=1; shift ;;
     --sandbox)      SANDBOX=1; shift ;;
     --digest)       DIGEST=1; shift ;;               # ask agy for a digest-only reply
     --mode)         need "$#" "$1"; MODE="$2"; shift 2

@@ -31,6 +31,12 @@
       "description": "Default agy print-mode timeout when --timeout is not passed, e.g. 5m, 10m, 300s.",
       "default": "5m"
     },
+    "full_access": {
+      "type": "string",
+      "title": "Enable full access by default",
+      "description": "When on (true), agy runs with --dangerously-skip-permissions (--full-access/--yolo), allowing tools, file writes, loopback network, and process execution without confirmation. Set to off/false/0/no to require explicit flags or permissions.allow rules.",
+      "default": "off"
+    },
     "inject_policy": {
       "type": "string",
       "title": "Inject routing policy at session start and compact",
