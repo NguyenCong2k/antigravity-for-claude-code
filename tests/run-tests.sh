@@ -883,6 +883,12 @@ out=$(CLAUDE_PLUGIN_OPTION_CODING_POLICY=off "$HOOKS/inject-policy.sh" 2>/dev/nu
 if [ "$rc" = 0 ] && [ -z "$out" ]; then echo "ok: inject-policy off -> exit 0 + no output"; PASS=$((PASS+1));
 else echo "FAIL: inject-policy off (rc=$rc, out='${out:0:40}')"; FAIL=$((FAIL+1)); fi
 
+out=$(printf '%s' '{"source":"startup"}' | "$HOOKS/inject-policy.sh" 2>/dev/null); rc=$?
+check "inject-policy silent on startup event" 0 "$rc" "" "$out"
+
+out=$(printf '%s' '{"source":"compact"}' | "$HOOKS/inject-policy.sh" 2>/dev/null); rc=$?
+check "inject-policy emits on compact event" 0 "$rc" "additionalContext" "$out"
+
 # check-agy: exits 0 whether agy is present (stub) or absent, and warns when absent
 out=$("$HOOKS/check-agy.sh" 2>/dev/null); rc=$?
 check "check-agy (agy present) -> exit 0" 0 "$rc"
@@ -899,6 +905,10 @@ for groups in hooks.values():
     for g in groups:
         for h in g["hooks"]:
             assert h["type"]=="command" and "CLAUDE_PLUGIN_ROOT" in h["command"]
+startup_cmds = [h["command"] for g in hooks.get("SessionStart", []) if g.get("matcher") == "startup" for h in g.get("hooks", [])]
+compact_cmds = [h["command"] for g in hooks.get("SessionStart", []) if g.get("matcher") == "compact" for h in g.get("hooks", [])]
+assert not any("inject-policy.sh" in c for c in startup_cmds), "inject-policy registered for startup"
+assert any("inject-policy.sh" in c for c in compact_cmds), "inject-policy not registered for compact"
 PY
 check "hooks.json shape valid (SessionStart + UserPromptSubmit)" 0 "$rc"
 

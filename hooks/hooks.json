@@ -8,12 +8,6 @@
         ]
       },
       {
-        "matcher": "startup",
-        "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/inject-policy.sh\"" }
-        ]
-      },
-      {
         "matcher": "compact",
         "hooks": [
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/inject-policy.sh\"" }
