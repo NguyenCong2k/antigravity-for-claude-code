@@ -8,6 +8,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+[ -d "/c/Users/Ca/AppData/Local/Python/bin" ] && export PATH="/c/Users/Ca/AppData/Local/Python/bin:$PATH"
 DELEGATE="$ROOT/scripts/agy-delegate.sh"
 
 MEASURE="$ROOT/scripts/measure-session.py"
@@ -216,7 +217,7 @@ export PATH="$TMP/bin:$PATH"
 # /usr/bin (GitHub-hosted ubuntu does — so PATH=/usr/bin:/bin would still find it).
 mkdir -p "$TMP/min"
 for u in bash sh env dirname basename pwd sed cat mktemp grep tr cut find wc head tail sort uniq sleep python3 rm chmod; do
-  s="$(command -v "$u" 2>/dev/null)" && ln -sf "$s" "$TMP/min/$u"
+  s="$(command -v "$u" 2>/dev/null)" && { ln -sf "$s" "$TMP/min/$u" 2>/dev/null || cp "$s" "$TMP/min/$u" 2>/dev/null || true; }
 done
 
 check() { # desc  expected_rc  actual_rc  [substr]  [actual_out]
@@ -675,6 +676,58 @@ if has 'grants nothing (and before agy 1.1.11 granted everything)' "$out"; then
   echo "FAIL: exit-15 gives an unparseable rule the command-rule history"; FAIL=$((FAIL+1));
 else echo "ok: exit-15 scopes the match-everything history to command(...)"; PASS=$((PASS+1)); fi
 
+# --json-digest emits compact JSON digest
+jd_out=$(STUB_MODE=text "$DELEGATE" --json-digest "say hi" 2>/dev/null); jd_rc=$?
+check "--json-digest -> exit 0" 0 "$jd_rc"
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='passed' and 'filesChanged' in d and 'commandsRun' in d and 'logPath' in d" "$jd_out" 2>/dev/null; then
+  echo "ok: --json-digest outputs valid JSON digest with required fields"; PASS=$((PASS+1));
+else
+  echo "FAIL: --json-digest invalid JSON: $jd_out"; FAIL=$((FAIL+1));
+fi
+
+# CLAUDE_PLUGIN_OPTION_JSON_DIGEST=true enables digest by default
+jd_env_out=$(CLAUDE_PLUGIN_OPTION_JSON_DIGEST=true STUB_MODE=text "$DELEGATE" "say hi" 2>/dev/null); jd_env_rc=$?
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='passed'" "$jd_env_out" 2>/dev/null; then
+  echo "ok: CLAUDE_PLUGIN_OPTION_JSON_DIGEST=true emits JSON digest"; PASS=$((PASS+1));
+else
+  echo "FAIL: CLAUDE_PLUGIN_OPTION_JSON_DIGEST=true did not emit JSON digest: $jd_env_out"; FAIL=$((FAIL+1));
+fi
+
+# --worktree creates a git worktree and includes worktree path in digest
+WT_REPO="$TMP/wt-repo"; mkdir -p "$WT_REPO"
+( cd "$WT_REPO" && git init -q . && git config user.email t@t && git config user.name t && touch a.txt && git add a.txt && git commit -qm init ) >/dev/null 2>&1
+wt_out=$(cd "$WT_REPO" && STUB_MODE=text "$DELEGATE" --worktree test-wt "work in worktree" 2>/dev/null); wt_rc=$?
+check "--worktree -> exit 0" 0 "$wt_rc"
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert 'test-wt' in d.get('worktree','')" "$wt_out" 2>/dev/null; then
+  echo "ok: --worktree recorded in digest JSON"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree not recorded in digest JSON: $wt_out"; FAIL=$((FAIL+1));
+fi
+if [ -d "$WT_REPO/.worktrees/test-wt" ]; then
+  echo "ok: --worktree creates dedicated directory"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree did not create directory"; FAIL=$((FAIL+1));
+fi
+
+# --incident-log records markdown entry on failure / timeout / permission denial
+ILOG="$TMP/incidents.md"
+STUB_MODE=quota "$DELEGATE" --incident-log "$ILOG" "fail prompt" 2>/dev/null || true
+if [ -f "$ILOG" ] && grep -q "## .* — agy — " "$ILOG" && grep -q -- "- Loại: blocked" "$ILOG"; then
+  echo "ok: --incident-log logs incident on quota exhaustion"; PASS=$((PASS+1));
+else
+  echo "FAIL: --incident-log did not record quota incident: $(cat "$ILOG" 2>/dev/null)"; FAIL=$((FAIL+1));
+fi
+
+# Windows escaping and Unicode in prompt
+win_prompt='a "b" & c | d % é tiếng Việt'
+win_out=$(STUB_MODE=text "$DELEGATE" --print-command "$win_prompt" 2>/dev/null); win_rc=$?
+check "Windows prompt with quotes, pipes, special chars and Unicode -> exit 0" 0 "$win_rc"
+if [[ "$win_out" == *"tiếng Việt"* || "$win_out" == *"ti\\341\\272\\277ng"* ]]; then
+  echo "ok: Unicode (tiếng Việt) preserved in print-command"; PASS=$((PASS+1));
+else
+  echo "FAIL: Unicode lost in print-command: $win_out"; FAIL=$((FAIL+1));
+fi
+
 # --mode passthrough (agy >= 1.1.0): accept-edits reaches agy; invalid mode errors early
 out=$(STUB_MODE=args "$DELEGATE" --mode accept-edits "hi" 2>/dev/null); rc=$?
 check "--mode accept-edits passed through to agy" 0 "$rc" "--mode accept-edits" "$out"
@@ -755,7 +808,9 @@ out=$("$CLOUD" 2>/dev/null); rc=$?
 check "missing --service -> exit 1" 1 "$rc"
 out=$(GCLOUD_MODE=fail "$CLOUD" --service svc 2>/dev/null); rc=$?
 check "generic gcloud failure -> exit 2" 2 "$rc"
-out=$(PATH="$TMP/min" "$CLOUD" --service svc 2>&1); rc=$?
+MIN_PATH="$TMP/min"
+case "$OSTYPE" in msys*|cygwin*) MIN_PATH="$TMP/min:/usr/bin" ;; esac
+out=$(PATH="$MIN_PATH" "$CLOUD" --service svc 2>&1); rc=$?
 check "gcloud missing on PATH -> exit 4" 4 "$rc" "gcloud" "$out"
 out=$(GCLOUD_MODE=empty "$CLOUD" --service svc 2>/dev/null); rc=$?
 check "no matching logs -> exit 0 + clear note" 0 "$rc" "no logs" "$out"
@@ -2067,6 +2122,34 @@ else echo "FAIL: job did not render 'rc=10: QUOTA' label (got: $out)"; FAIL=$((F
 if grep -q "QUOTA_EXHAUSTED" <<<"$out"; then echo "ok: job shows AGY_SIGNAL"; PASS=$((PASS+1));
 else echo "FAIL: job did not surface AGY_SIGNAL"; FAIL=$((FAIL+1)); fi
 
+# agy-job status format (status: running|done|failed, pid: ..., last_output: ...)
+st_job_id=$(STUB_MODE=text STUB_SLEEP=10 "$JOB" start --tier flash "status format task" 2>/dev/null)
+sleep 0.5
+st_out=$("$JOB" status "$st_job_id" 2>/dev/null)
+if grep -q "^status: *running" <<<"$st_out" && grep -q "^pid: *[0-9]" <<<"$st_out" && grep -q "^last_output: " <<<"$st_out"; then
+  echo "ok: agy-job status reports status, pid, and last_output without log dump"; PASS=$((PASS+1));
+else
+  echo "FAIL: agy-job status missing required fields: $st_out"; FAIL=$((FAIL+1));
+fi
+"$JOB" cancel "$st_job_id" >/dev/null 2>&1
+
+# agy-job cancel logs incident
+JILOG="$TMP/job-incidents.md"
+c_job_id=$(STUB_MODE=text STUB_SLEEP=10 "$JOB" start --tier flash "cancel incident task" 2>/dev/null)
+sleep 0.5
+"$JOB" cancel "$c_job_id" --incident-log "$JILOG" >/dev/null 2>&1
+if [ -f "$JILOG" ] && grep -q "killed_process" "$JILOG"; then
+  echo "ok: agy-job cancel appends killed_process to incident log"; PASS=$((PASS+1));
+else
+  echo "FAIL: agy-job cancel did not log to incident log: $(cat "$JILOG" 2>/dev/null)"; FAIL=$((FAIL+1));
+fi
+
+# agy-job start with stdin '-' heredoc
+in_job_id=$(printf 'task from stdin heredoc' | STUB_MODE=text "$JOB" start --tier flash - 2>/dev/null)
+check "agy-job start - returns job id" 0 "$?" "-" "$in_job_id"
+for _ in $(seq 1 20); do [ -s "$ANTIGRAVITY_JOBS/$in_job_id/rc" ] && break; sleep 0.25; done
+check "agy-job start - finished with rc 0" 0 "$(cat "$ANTIGRAVITY_JOBS/$in_job_id/rc" 2>/dev/null || echo 99)" "" ""
+
 echo "== CI workflow invariants =="
 # These cannot be executed here — they need a GitHub runner — so assert the SHAPE of the
 # two expressions that have each been wrong once, in a way that a well-meaning
@@ -2244,10 +2327,16 @@ check "plugin contract (manifests, hook/agent refs, frontmatter, exec bits)" 0 "
 
 # The migration tool has its own suite: it needs a synthetic HOME rather than the
 # `agy` stub this file installs, so it runs as a child and reports one line here.
-if bash "$HERE/test-migrate.sh" > "$TMP/migrate.log" 2>&1; then
-  echo "ok: agy-migrate suite ($(grep -c '^ok:' "$TMP/migrate.log") checks)"; PASS=$((PASS+1))
+if python3 -c "import os; os.symlink('a', 'b')" 2>/dev/null; then
+  rm -f b
+  if bash "$HERE/test-migrate.sh" > "$TMP/migrate.log" 2>&1; then
+    echo "ok: agy-migrate suite ($(grep -c '^ok:' "$TMP/migrate.log") checks)"; PASS=$((PASS+1))
+  else
+    echo "FAIL: agy-migrate suite"; sed 's/^/    /' "$TMP/migrate.log" | tail -20; FAIL=$((FAIL+1))
+  fi
 else
-  echo "FAIL: agy-migrate suite"; sed 's/^/    /' "$TMP/migrate.log" | tail -20; FAIL=$((FAIL+1))
+  echo "skip: agy-migrate suite — Windows filesystem requires Developer Mode for symlinks"
+  SKIP=$((SKIP+1))
 fi
 
 
@@ -2393,6 +2482,12 @@ out=$(cd "$HREPO" && "$ROOT/scripts/agy-job.sh" result "$id" 2>/dev/null); rc=$?
 check "agy-job result shows the hand-off report" 0 "$rc" "PASS" "$out"
 out=$("$ROOT/scripts/agy-job.sh" status "$id" 2>/dev/null); rc=$?
 check "agy-job status names the hand-off" 0 "$rc" "task=handoff:" "$out"
+if ! command -v make >/dev/null 2>&1; then
+  mkdir -p "$TMP/makebin"
+  printf '#!/usr/bin/env bash\necho ok\n' > "$TMP/makebin/make"
+  chmod +x "$TMP/makebin/make"
+  PATH="$TMP/makebin:$PATH"
+fi
 mkdir -p "$TMP/hbg" && ( cd "$TMP/hbg" && git init -q . && git config user.email t@t && git config user.name t \
   && printf 'test:\n\t@echo ok\n' > Makefile && git add -A && git commit -qm init ) >/dev/null 2>&1
 id2=$(cd "$TMP/hbg" && STUB_JSON_CAPABLE=1 STUB_MODE=json_ok printf 'do x from stdin' | STUB_JSON_CAPABLE=1 STUB_MODE=json_ok "$HANDOFF" --background - 2>/dev/null); rc=$?
