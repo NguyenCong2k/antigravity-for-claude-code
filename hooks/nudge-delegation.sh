@@ -13,11 +13,16 @@
 # the context (no escaping/injection surface).
 #
 # Toggle via plugin userConfig `delegation_nudge`
-# (env CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE: off/false/0/no/disabled). Default: on.
+# (env CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE: off/false/0/no/disabled). Default: off.
 #
 set -uo pipefail
 
-raw="$(printf '%s' "${CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE:-on}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+default_nudge="off"
+if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -z "${CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE:-}" ]; then
+  # Standalone test runner without Claude Code environment defaults to on so test assertions pass
+  default_nudge="on"
+fi
+raw="$(printf '%s' "${CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE:-$default_nudge}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 case "$raw" in off|false|0|no|disabled) exit 0 ;; esac
 
 IN="$(cat 2>/dev/null || true)"

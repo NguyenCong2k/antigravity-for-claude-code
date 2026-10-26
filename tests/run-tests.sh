@@ -774,7 +774,7 @@ else echo "ok: no clip NOTE when under the cap"; PASS=$((PASS+1)); fi
 echo "== hooks =="
 HOOKS="$ROOT/hooks"
 
-python3 -c "import json; json.load(open('$HOOKS/policy-context.json'))" 2>/dev/null; rc=$?
+python3 -c "import json,sys; json.load(sys.stdin)" < "$HOOKS/policy-context.json" 2>/dev/null; rc=$?
 check "policy-context.json is valid JSON" 0 "$rc"
 
 out=$("$HOOKS/inject-policy.sh" 2>/dev/null); rc=$?
@@ -783,6 +783,14 @@ check "inject-policy is cost-aware (not 'delegate everything')" 0 "$rc" "COST-AW
 # the emitted stdout is a well-formed SessionStart hook payload (not just substrings)
 printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["hookSpecificOutput"]["hookEventName"]=="SessionStart"' 2>/dev/null; rc=$?
 check "inject-policy emits valid SessionStart JSON" 0 "$rc"
+
+line_count=$(printf '%s' "$out" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"].splitlines()))' 2>/dev/null || echo 99)
+if [ "$line_count" -le 3 ]; then echo "ok: inject-policy is concise (<= 3 lines: got $line_count)"; PASS=$((PASS+1));
+else echo "FAIL: inject-policy exceeds 3 lines (got $line_count)"; FAIL=$((FAIL+1)); fi
+
+out=$(CLAUDE_PLUGIN_OPTION_INJECT_POLICY=off "$HOOKS/inject-policy.sh" 2>/dev/null); rc=$?
+if [ "$rc" = 0 ] && [ -z "$out" ]; then echo "ok: inject_policy=off -> exit 0 + no output"; PASS=$((PASS+1));
+else echo "FAIL: inject_policy=off (rc=$rc, out='${out:0:40}')"; FAIL=$((FAIL+1)); fi
 
 out=$(CLAUDE_PLUGIN_OPTION_CODING_POLICY=off "$HOOKS/inject-policy.sh" 2>/dev/null); rc=$?
 if [ "$rc" = 0 ] && [ -z "$out" ]; then echo "ok: inject-policy off -> exit 0 + no output"; PASS=$((PASS+1));

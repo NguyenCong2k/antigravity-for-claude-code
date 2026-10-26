@@ -31,10 +31,16 @@
       "description": "Default agy print-mode timeout when --timeout is not passed, e.g. 5m, 10m, 300s.",
       "default": "5m"
     },
+    "inject_policy": {
+      "type": "string",
+      "title": "Inject routing policy at session start and compact",
+      "description": "When on, a SessionStart hook injects this plugin's short cost-aware routing policy (≤ 3 lines) as session context (re-injected after compact). Set to off/false/0/no to suppress.",
+      "default": "on"
+    },
     "coding_policy": {
       "type": "string",
-      "title": "Inject routing policy at session start",
-      "description": "When on, a SessionStart hook injects this plugin's cost-aware routing policy (delegate above the break-even, keep Claude's context lean, always verify agy's output) as session context, so the discipline applies without invoking the skill. Set to off/false/0/no to suppress.",
+      "title": "Inject routing policy at session start (legacy alias)",
+      "description": "Legacy alias for inject_policy. When on, a SessionStart hook injects this plugin's cost-aware routing policy as session context. Set to off/false/0/no to suppress.",
       "default": "on"
     },
     "default_model": {
@@ -77,7 +83,7 @@
       "type": "string",
       "title": "Nudge delegation on bulk-looking prompts",
       "description": "When on, a UserPromptSubmit hook adds a short advisory note to Claude's context when a prompt looks like bulk work above the delegation break-even (mass edits, migrations, exhaustive tests, fan-out search). Advisory only — Claude still makes the break-even judgment per task. Set to off/false/0/no to suppress.",
-      "default": "on"
+      "default": "off"
     },
     "usage_log": {
       "type": "string",
