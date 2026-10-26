@@ -904,23 +904,28 @@ check "hooks.json shape valid (SessionStart + UserPromptSubmit)" 0 "$rc"
 
 # nudge-delegation (UserPromptSubmit): advisory material only — never a mandate
 NUDGE="$HOOKS/nudge-delegation.sh"
+# default is silent (delegation_nudge=off)
 out=$(printf '%s' '{"prompt":"migrate every caller from APIv1 to APIv2 across the codebase"}' | "$NUDGE" 2>/dev/null); rc=$?
-check "nudge fires on bulk EN prompt" 0 "$rc" "additionalContext" "$out"
+check "nudge is silent by default" 0 "$rc" "" "$out"
+
+# when enabled via CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=on
+out=$(printf '%s' '{"prompt":"migrate every caller from APIv1 to APIv2 across the codebase"}' | CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=on "$NUDGE" 2>/dev/null); rc=$?
+check "nudge fires on bulk EN prompt when enabled" 0 "$rc" "additionalContext" "$out"
 check "nudge preserves Claude's judgment (not a mandate)" 0 "$rc" "THE JUDGMENT IS YOURS" "$out"
 printf '%s' "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['hookSpecificOutput']['hookEventName']=='UserPromptSubmit'" 2>/dev/null; rc=$?
 check "nudge emits valid UserPromptSubmit JSON" 0 "$rc"
-out=$(printf '%s' '{"prompt":"リポジトリ全体のテストを網羅的に生成して"}' | "$NUDGE" 2>/dev/null); rc=$?
-check "nudge fires on bulk JA prompt" 0 "$rc" "additionalContext" "$out"
-out=$(printf '%s' '{"prompt":"fix the typo in README"}' | "$NUDGE" 2>/dev/null); rc=$?
+out=$(printf '%s' '{"prompt":"リポジトリ全体のテストを網羅的に生成して"}' | CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=on "$NUDGE" 2>/dev/null); rc=$?
+check "nudge fires on bulk JA prompt when enabled" 0 "$rc" "additionalContext" "$out"
+out=$(printf '%s' '{"prompt":"fix the typo in README"}' | CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=on "$NUDGE" 2>/dev/null); rc=$?
 if [ "$rc" = 0 ] && [ -z "$out" ]; then echo "ok: nudge silent on a small prompt"; PASS=$((PASS+1));
 else echo "FAIL: nudge fired on a small prompt (rc=$rc)"; FAIL=$((FAIL+1)); fi
-out=$(printf '%s' '{"prompt":"/antigravity:delegate migrate everything"}' | "$NUDGE" 2>/dev/null)
+out=$(printf '%s' '{"prompt":"/antigravity:delegate migrate everything"}' | CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=on "$NUDGE" 2>/dev/null)
 if [ -z "$out" ]; then echo "ok: nudge silent when already delegating"; PASS=$((PASS+1));
 else echo "FAIL: nudge fired on an antigravity command"; FAIL=$((FAIL+1)); fi
 out=$(printf '%s' '{"prompt":"migrate all files"}' | CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=off "$NUDGE" 2>/dev/null)
 if [ -z "$out" ]; then echo "ok: delegation_nudge=off suppresses the nudge"; PASS=$((PASS+1));
 else echo "FAIL: nudge fired while disabled"; FAIL=$((FAIL+1)); fi
-out=$(printf '%s' '{"prompt":"hello","cwd":"/home/u/migration-tool"}' | "$NUDGE" 2>/dev/null)
+out=$(printf '%s' '{"prompt":"hello","cwd":"/home/u/migration-tool"}' | CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE=on "$NUDGE" 2>/dev/null)
 if [ -z "$out" ]; then echo "ok: nudge scans only the prompt field (cwd noise ignored)"; PASS=$((PASS+1));
 else echo "FAIL: nudge matched a non-prompt field"; FAIL=$((FAIL+1)); fi
 
