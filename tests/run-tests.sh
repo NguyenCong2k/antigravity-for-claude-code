@@ -136,6 +136,7 @@ case "${STUB_MODE:-text}" in
   empty)   exit 0 ;;                  # no stdout -> wrapper should exit 3
   fail)    echo "boom" >&2; exit 7 ;; # nonzero  -> wrapper should exit 2
   args)    printf '%s\n' "$*" ;;      # echo args for assertions
+  argv)    for _a in "$@"; do printf 'ARG<%s>\n' "$_a"; done ;;  # one line per argv, boundary-safe
   quota)   echo "Error: quota exceeded for this model" >&2; exit 1 ;;     # -> wrapper exit 10
   credits) echo "Error: your Google AI credits balance is too low to run this request" >&2; exit 1 ;; # agy 1.2.12+ -> exit 10
   auth)    echo "Error: request is unauthenticated; please sign in" >&2; exit 1 ;; # -> exit 11
@@ -845,6 +846,21 @@ if [[ "$win_out" == *"tiếng Việt"* || "$win_out" == *"ti\\341\\272\\277ng"* 
   echo "ok: Unicode (tiếng Việt) preserved in print-command"; PASS=$((PASS+1));
 else
   echo "FAIL: Unicode lost in print-command: $win_out"; FAIL=$((FAIL+1));
+fi
+# Finding 9: print-command only formats a string; it never spawns a process. Run the
+# stub for real and assert argv boundaries, so Windows argument escaping is exercised.
+win_dir="$TMP/thư mục có dấu cách"
+win_argv=$(STUB_MODE=argv "$DELEGATE" --dir "$win_dir" --tier flash "$win_prompt" 2>/dev/null); win_argv_rc=$?
+check "Windows special/Unicode prompt -> real agy invocation exit 0" 0 "$win_argv_rc"
+if grep -qxF "ARG<$win_prompt>" <<<"$win_argv"; then
+  echo "ok: real invocation delivers the special/Unicode prompt as one argv"; PASS=$((PASS+1));
+else
+  echo "FAIL: real invocation mangled the prompt argv: $win_argv"; FAIL=$((FAIL+1));
+fi
+if grep -qxF "ARG<$win_dir>" <<<"$win_argv"; then
+  echo "ok: real invocation delivers a spaced/Unicode --dir as one argv"; PASS=$((PASS+1));
+else
+  echo "FAIL: real invocation mangled the --dir argv: $win_argv"; FAIL=$((FAIL+1));
 fi
 
 # --mode passthrough (agy >= 1.1.0): accept-edits reaches agy; invalid mode errors early
