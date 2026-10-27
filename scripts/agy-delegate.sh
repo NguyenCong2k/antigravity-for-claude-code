@@ -252,13 +252,25 @@ result_text = os.environ.get("DIGEST_RESULT", "")
 
 files_changed = []
 try:
-    proc = subprocess.run(["git", "status", "--porcelain"], cwd=target_dir, capture_output=True, text=True, errors="replace")
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line:
-            fn = line[2:].strip().strip('"')
-            if fn and fn not in files_changed:
-                files_changed.append(fn)
+    # -z: paths are NUL-terminated and NEVER quoted (core.quotepath=false is belt and
+    # braces for older git). The old line[2:].strip('"') parsed `"ki\341\273\203m..."` as
+    # a literal escaped name and `R  old -> new` as one impossible path.
+    proc = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "status", "--porcelain", "-z"],
+        cwd=target_dir, capture_output=True)
+    records = proc.stdout.decode("utf-8", "replace").split("\0")
+    i = 0
+    while i < len(records):
+        rec = records[i]
+        i += 1
+        if len(rec) < 4:
+            continue
+        code, path = rec[0], rec[3:]
+        # Rename/copy: this record names the destination, the next names the source.
+        if code in ("R", "C") and i < len(records):
+            i += 1
+        if path and path not in files_changed:
+            files_changed.append(path)
 except Exception:
     pass
 

@@ -830,6 +830,25 @@ else
   echo "FAIL: --worktree swallowed the add error: $badwt_err"; FAIL=$((FAIL+1));
 fi
 
+# Finding 11: filesChanged must carry real Unicode paths and rename destinations.
+FD_REPO="$TMP/fd-repo"; mkdir -p "$FD_REPO"
+( cd "$FD_REPO" && git init -q . && git config user.email t@t && git config user.name t \
+  && printf 'one\n' > a.txt && git add a.txt && git commit -qm init \
+  && printf 'two\n' >> a.txt && touch "kiểm-thử.txt" ) >/dev/null 2>&1
+fd_out=$(cd "$FD_REPO" && STUB_MODE=text "$DELEGATE" --json-digest "say hi" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert 'kiểm-thử.txt' in d['filesChanged']; assert not any('\\\\341' in f for f in d['filesChanged'])" "$fd_out" 2>/dev/null; then
+  echo "ok: filesChanged keeps Unicode paths unescaped"; PASS=$((PASS+1));
+else
+  echo "FAIL: filesChanged escaped/mangled a Unicode path: $fd_out"; FAIL=$((FAIL+1));
+fi
+( cd "$FD_REPO" && git add a.txt && git mv a.txt b.txt ) >/dev/null 2>&1
+fd_ren_out=$(cd "$FD_REPO" && STUB_MODE=text "$DELEGATE" --json-digest "say hi" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert 'b.txt' in d['filesChanged']; assert not any('->' in f for f in d['filesChanged'])" "$fd_ren_out" 2>/dev/null; then
+  echo "ok: filesChanged uses the rename destination, not 'old -> new'"; PASS=$((PASS+1));
+else
+  echo "FAIL: filesChanged mishandled a rename: $fd_ren_out"; FAIL=$((FAIL+1));
+fi
+
 # --incident-log records markdown entry on failure / timeout / permission denial
 ILOG="$TMP/incidents.md"
 STUB_MODE=quota "$DELEGATE" --incident-log "$ILOG" "fail prompt" 2>/dev/null || true
