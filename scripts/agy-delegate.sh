@@ -478,14 +478,53 @@ if [ -n "$WORKTREE_BRANCH" ]; then
   REPO_ROOT="$(git rev-parse --show-toplevel)"
   WORKTREE_DIR="$REPO_ROOT/.worktrees/$WORKTREE_BRANCH"
   mkdir -p "$(dirname "$WORKTREE_DIR")"
-  if [ -d "$WORKTREE_DIR" ]; then
-    if ! git -C "$REPO_ROOT" worktree list 2>/dev/null | grep -qF "$WORKTREE_DIR"; then
-      rm -rf "$WORKTREE_DIR"
-      git -C "$REPO_ROOT" worktree add -B "$WORKTREE_BRANCH" "$WORKTREE_DIR" HEAD >/dev/null 2>&1
-    fi
-  else
-    git -C "$REPO_ROOT" worktree add -B "$WORKTREE_BRANCH" "$WORKTREE_DIR" HEAD >/dev/null 2>&1
+
+  # Any branch already checked out in ANY worktree (the current one included) cannot be
+  # checked out again. `git worktree add -B` would refuse too, but its diagnostic used to
+  # be swallowed; name the owner instead, so the caller knows which worktree to release.
+  # `worktree list --porcelain` is the only stable way to map a branch to its worktree.
+  wt_owner="$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \
+    | awk -v ref="refs/heads/$WORKTREE_BRANCH" '
+        $1 == "worktree" { wt = substr($0, 10) }
+        $1 == "branch" && $2 == ref { print wt; exit }')"
+  if [ -n "$wt_owner" ] && [ "$wt_owner" != "$WORKTREE_DIR" ]; then
+    die "--worktree branch '$WORKTREE_BRANCH' is already checked out at $wt_owner; pick another branch or release that worktree"
   fi
+
+  # A lock beside the managed worktree stops two concurrent delegations from reusing (and
+  # deleting) the same directory. A dead holder is a stale lock from an interrupted run.
+  WORKTREE_LOCK="$REPO_ROOT/.worktrees/$WORKTREE_BRANCH.lock"
+  if [ -f "$WORKTREE_LOCK" ]; then
+    lock_pid="$(cat "$WORKTREE_LOCK" 2>/dev/null || true)"
+    if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+      die "--worktree branch '$WORKTREE_BRANCH' is in use by another delegation (pid $lock_pid)"
+    fi
+    rm -f "$WORKTREE_LOCK"
+  fi
+  echo $$ > "$WORKTREE_LOCK"
+
+  # Reusing a worktree from a failed/cancelled run would fold its stale uncommitted files
+  # into this run's filesChanged. Remove OUR managed worktree and re-create it from HEAD;
+  # a worktree of the same branch anywhere else was rejected above, so nothing a user owns
+  # is touched. Never swallow the add error: report git's own diagnostic.
+  wt_err="$(mktemp "${TMPDIR:-/tmp}/agy-wt-err.XXXXXX")"
+  if [ -d "$WORKTREE_DIR" ] || git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -qF "worktree $WORKTREE_DIR"; then
+    if ! git -C "$REPO_ROOT" worktree remove --force "$WORKTREE_DIR" 2>"$wt_err"; then
+      # Not registered (a leftover directory) or removal failed: drop the directory, then
+      # let prune clear any administrative record that points at the missing path.
+      rm -rf "$WORKTREE_DIR" || die "--worktree: cannot remove stale worktree $WORKTREE_DIR"
+    fi
+    git -C "$REPO_ROOT" worktree prune 2>/dev/null || true
+  fi
+  if ! git -C "$REPO_ROOT" worktree add -B "$WORKTREE_BRANCH" "$WORKTREE_DIR" HEAD >/dev/null 2>"$wt_err"; then
+    err_msg="$(tr '\n' ' ' < "$wt_err" 2>/dev/null | sed 's/  */ /g')"
+    rm -f "$wt_err"
+    git -C "$REPO_ROOT" worktree prune 2>/dev/null || true
+    rm -rf "$WORKTREE_DIR" 2>/dev/null || true
+    rm -f "$WORKTREE_LOCK"
+    die "--worktree add failed: ${err_msg:-unknown git worktree error}"
+  fi
+  rm -f "$wt_err"
   ADD_DIRS+=("$WORKTREE_DIR")
   cd "$WORKTREE_DIR"
 fi
@@ -604,7 +643,7 @@ TO_CMD="$(timeout_cmd || true)"
 # it used to be cleaned by a trailing `rm -f`, which a SIGINT during the probe
 # skips. `rm -f ""` is a silent no-op, so the unset ones cost nothing.
 HELPF=""; ERR=""; OUTF=""
-trap 'rm -f "$HELPF" "$ERR" "$OUTF" 2>/dev/null' EXIT
+trap 'rm -f "$HELPF" "$ERR" "$OUTF" 2>/dev/null; [ -n "${WORKTREE_LOCK:-}" ] && rm -f "$WORKTREE_LOCK" 2>/dev/null; [ -n "${REPO_ROOT:-}" ] && git -C "$REPO_ROOT" worktree prune 2>/dev/null || true' EXIT
 
 JSON_MODE=0
 raw_so="${CLAUDE_PLUGIN_OPTION_STRUCTURED_OUTPUT:-on}"

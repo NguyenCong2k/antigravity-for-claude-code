@@ -728,6 +728,56 @@ else
   echo "FAIL: --worktree did not create directory"; FAIL=$((FAIL+1));
 fi
 
+# Finding 5: active branch collision is prevented
+cur_br="$(cd "$WT_REPO" && git branch --show-current)"
+col_err="$( (cd "$WT_REPO" && STUB_MODE=text "$DELEGATE" --worktree "$cur_br" "say hi" 2>&1) || true )"
+if [[ "$col_err" == *"already checked out"* ]]; then
+  echo "ok: --worktree prevents active branch collision"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree allowed active branch collision: $col_err"; FAIL=$((FAIL+1));
+fi
+
+# Finding 5: worktree clean state ensures dirty stale files are removed on reuse
+touch "$WT_REPO/.worktrees/test-wt/stale_dirty.txt"
+reuse_out=$(cd "$WT_REPO" && STUB_MODE=text "$DELEGATE" --worktree test-wt "say hi again" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert 'stale_dirty.txt' not in d.get('filesChanged', [])" "$reuse_out" 2>/dev/null; then
+  echo "ok: --worktree ensures clean state and removes stale uncommitted files"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree reused dirty state with stale files: $reuse_out"; FAIL=$((FAIL+1));
+fi
+
+# Finding 5: a branch checked out in ANOTHER worktree is refused, not force-deleted
+(cd "$WT_REPO" && git worktree add -q -B other-br "$TMP/other-wt" HEAD) >/dev/null 2>&1
+other_err="$( (cd "$WT_REPO" && STUB_MODE=text "$DELEGATE" --worktree other-br "say hi" 2>&1) || true )"
+if [[ "$other_err" == *"already checked out at"* ]]; then
+  echo "ok: --worktree refuses a branch checked out in another worktree"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree did not name the other worktree holding the branch: $other_err"; FAIL=$((FAIL+1));
+fi
+if [ -d "$TMP/other-wt" ]; then
+  echo "ok: the other worktree is left untouched"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree deleted a user worktree it did not own"; FAIL=$((FAIL+1));
+fi
+
+# Finding 5: a live lock means another delegation owns the managed worktree
+printf '%s\n' "$$" > "$WT_REPO/.worktrees/test-wt.lock"
+lock_err="$( (cd "$WT_REPO" && STUB_MODE=text "$DELEGATE" --worktree test-wt "say hi" 2>&1) || true )"
+rm -f "$WT_REPO/.worktrees/test-wt.lock"
+if [[ "$lock_err" == *"in use by another delegation"* ]]; then
+  echo "ok: --worktree refuses a worktree held by a live delegation"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree ignored a live delegation lock: $lock_err"; FAIL=$((FAIL+1));
+fi
+
+# Finding 5: git's own worktree-add diagnostic reaches the caller instead of being swallowed
+badwt_err="$( (cd "$WT_REPO" && STUB_MODE=text "$DELEGATE" --worktree "bad..name" "say hi" 2>&1) || true )"
+if [[ "$badwt_err" == *"worktree add failed"* && "$badwt_err" == *"bad..name"* ]]; then
+  echo "ok: --worktree reports git's worktree-add error"; PASS=$((PASS+1));
+else
+  echo "FAIL: --worktree swallowed the add error: $badwt_err"; FAIL=$((FAIL+1));
+fi
+
 # --incident-log records markdown entry on failure / timeout / permission denial
 ILOG="$TMP/incidents.md"
 STUB_MODE=quota "$DELEGATE" --incident-log "$ILOG" "fail prompt" 2>/dev/null || true
