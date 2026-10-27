@@ -3,6 +3,36 @@
 All notable changes to **Antigravity for Claude Code**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## 0.30.3
+
+- **Worktree isolation is safe to reuse.** `--worktree` now refuses a branch checked out
+  in any worktree (naming the owner), guards its managed worktree with a live-PID lock so
+  two delegations cannot delete each other's state, recreates its own directory from HEAD
+  so stale uncommitted files never reach `filesChanged`, reports git's `worktree add`
+  diagnostic instead of swallowing it, and prunes its lock/administrative records on exit.
+- **JSON digests no longer require `python3`.** The wrapper probes `python3` then `python`
+  (rejecting a non-working shim) for both the digest and agy's structured envelope; when
+  neither exists it still emits a minimal valid digest. The test suite no longer hardcodes
+  a developer-specific Python path.
+- **`--json-digest` stdout stays parseable.** A partial `--print-timeout` reply or a reply
+  accompanying `denied_actions` is carried in the digest's bounded `result` field instead
+  of being printed ahead of the JSON document.
+- **`agy-job` start/status and Windows cancel.** A pid-less job inside the startup window
+  reports `running` instead of `failed`, the pid file is written atomically, and Windows
+  cancel maps the MSYS pid to its WINPID and uses `taskkill /F /T` so native agy children
+  die too (with the POSIX descendant kill kept for MSYS processes).
+- **Real Windows argv coverage.** The special-character/Unicode test now runs the stub for
+  real and asserts the prompt and a spaced/Unicode `--dir` arrive as single argv entries.
+- **Incident entries carry diagnostics.** A generic failure is classified `other`, `Kết quả`
+  includes agy's trimmed verbatim stderr, and multi-line prompts are flattened so the
+  markdown entry stays well formed.
+- **`filesChanged` handles Unicode and renames.** Git status is read NUL-delimited with
+  `core.quotepath=false`, so Vietnamese/Unicode paths are real strings and renames report
+  the destination instead of `old -> new`.
+- **`failures[]` means failure.** A passed run no longer turns banner, deprecation, or
+  ConPTY-fallback stderr into dozens of phantom failures; explicit error diagnostics and
+  every failed run are still reported.
+
 ## 0.30.2
 
 - **Full access support**: Added `--full-access` synonym for `--yolo` (`--dangerously-skip-permissions`) across `agy-delegate.sh` and userConfig option `full_access: true`.

@@ -1,6 +1,6 @@
 {
   "name": "antigravity",
-  "version": "0.30.2",
+  "version": "0.30.3",
   "description": "Run the Antigravity CLI (Gemini) as a collaborating AI inside Claude Code, with intelligent model routing across the SDLC. Claude conducts — requirements, architecture, the hard 20%, verification, review — and routes deterministic, high-volume work (scaffolding, tests, first-pass review, migrations, web/Vertex AI Search) to Antigravity. Hybrid agentic engineering; lower token cost as a financial lever.",
   "author": {
     "name": "linyuting"
@@ -40,7 +40,7 @@
     "json_digest": {
       "type": "string",
       "title": "Output compact JSON digest for Claude",
-      "description": "When on (true), agy-delegate prints a compact JSON digest (status, filesChanged, commandsRun, testsSummary, failures, logPath, worktree) instead of full output, keeping full logs in a file. Set to off/false/0/no to output text.",
+      "description": "When on (true), agy-delegate prints a compact JSON digest (status, filesChanged, commandsRun, testsSummary, failures, logPath, worktree, and result when a partial reply must be preserved) instead of full output, keeping full logs in a file. Set to off/false/0/no to output text.",
       "default": "off"
     },
     "incident_log": {
