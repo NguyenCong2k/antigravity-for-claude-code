@@ -97,6 +97,14 @@ cat > "$TMP/bin/agy" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${STUB_PIDFILE:-}" ] && echo $$ > "$STUB_PIDFILE"
 [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
+# Native-Windows tree used by the agy-job cancel test: cmd.exe is a real Windows
+# process with a native child, invisible to MSYS `ps` and killed only by taskkill /T.
+if [ -n "${STUB_NATIVE_SLEEP:-}" ] && command -v cmd.exe >/dev/null 2>&1; then
+  cmd.exe //c timeout /t "$STUB_NATIVE_SLEEP" >/dev/null 2>&1 &
+  _npid=$!
+  [ -n "${STUB_NATIVE_WINPID:-}" ] && ps -p "$_npid" -l 2>/dev/null | awk 'NR==2 {print $4}' > "$STUB_NATIVE_WINPID"
+  wait "$_npid" 2>/dev/null || true
+fi
 # `agy models` emits the slug format agy 1.1.5+ uses (was display names before) so doctor's
 # tier-model check is exercised against the current format.
 if [ "$1" = "models" ]; then
@@ -2269,6 +2277,48 @@ else
   echo "FAIL: agy-job status missing required fields: $st_out"; FAIL=$((FAIL+1));
 fi
 "$JOB" cancel "$st_job_id" >/dev/null 2>&1
+
+# Finding 8: a job whose pid file has not landed yet is STARTING, not failed. The window
+# is between spawn and `echo $!`; a concurrent status used to call a live job failed.
+race_jd="$ANTIGRAVITY_JOBS/finding8-race"; mkdir -p "$race_jd"
+printf 'id=finding8-race\nstarted_epoch=%s\n' "$(date +%s)" > "$race_jd/meta"
+race_out=$("$JOB" status finding8-race 2>/dev/null)
+if grep -q "^status: *running" <<<"$race_out"; then
+  echo "ok: pid-less job inside the startup window reports running"; PASS=$((PASS+1));
+else
+  echo "FAIL: pid-less job inside the startup window reported failed: $race_out"; FAIL=$((FAIL+1));
+fi
+printf 'id=finding8-stale\nstarted_epoch=%s\n' "$(( $(date +%s) - 60 ))" > "$race_jd/meta"
+stale_out=$("$JOB" status finding8-race 2>/dev/null)
+if grep -q "^status: *failed" <<<"$stale_out"; then
+  echo "ok: an old pid-less job is still reported failed"; PASS=$((PASS+1));
+else
+  echo "FAIL: an old pid-less job reported running forever: $stale_out"; FAIL=$((FAIL+1));
+fi
+rm -rf "$race_jd"
+
+# Finding 8 (Windows): cancel must reach native processes, which MSYS `ps` cannot see.
+case "${OSTYPE:-}" in msys*|cygwin*|win32) native_win=1 ;; *) native_win=0 ;; esac
+if [ "$native_win" = 1 ] && command -v taskkill >/dev/null 2>&1; then
+  NWIN="$TMP/native-winpid"; rm -f "$NWIN"
+  nid=$(STUB_MODE=text STUB_NATIVE_SLEEP=30 STUB_NATIVE_WINPID="$NWIN" "$JOB" start --tier flash "native tree task" 2>/dev/null)
+  for _ in $(seq 1 20); do [ -s "$NWIN" ] && break; sleep 0.25; done
+  nwin="$(cat "$NWIN" 2>/dev/null || true)"
+  "$JOB" cancel "$nid" >/dev/null 2>&1
+  sleep 0.5
+  native_alive=0
+  if [ -n "$nwin" ] && MSYS_NO_PATHCONV=1 tasklist /FI "PID eq $nwin" /FO CSV /NH 2>/dev/null | grep -q "\"$nwin\""; then
+    native_alive=1
+  fi
+  if [ -n "$nwin" ] && [ "$native_alive" = 0 ]; then
+    echo "ok: job cancel kills the native Windows process tree"; PASS=$((PASS+1));
+  else
+    echo "FAIL: job cancel left a native Windows process running (pid ${nwin:-?})"; FAIL=$((FAIL+1));
+    [ -n "$nwin" ] && MSYS_NO_PATHCONV=1 taskkill /F /T /PID "$nwin" >/dev/null 2>&1
+  fi
+else
+  echo "skip: native Windows process-tree cancel — not on Windows with taskkill"; SKIP=$((SKIP+1));
+fi
 
 # agy-job cancel logs incident
 JILOG="$TMP/job-incidents.md"
