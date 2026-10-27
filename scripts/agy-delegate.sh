@@ -325,13 +325,20 @@ if m:
     tests_summary = m.group(1).strip()
 
 failures = []
+# On a passed run, stderr is a banner channel (deprecation notices, ConPTY fallback
+# chatter). Dumping all of it into failures[] told the conductor a clean run had ~40
+# errors. Only explicit diagnostics survive; a failed run still reports everything.
+passed_error = re.compile(r'(?i)^\s*(error|fatal|traceback|uncaught|exception)\b|error:')
 if err_file and os.path.isfile(err_file):
     try:
         with open(err_file, encoding="utf-8", errors="replace") as fh:
             for l in fh:
                 line = l.rstrip()
-                if line and not line.startswith("AGY_USAGE ") and not line.startswith("AGY_SIGNAL "):
-                    failures.append(line)
+                if not line or line.startswith("AGY_USAGE ") or line.startswith("AGY_SIGNAL "):
+                    continue
+                if status == "passed" and not passed_error.search(line):
+                    continue
+                failures.append(line)
                 if len(failures) >= 40:
                     break
     except Exception:

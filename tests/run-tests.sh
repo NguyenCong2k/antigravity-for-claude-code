@@ -144,6 +144,10 @@ case "${STUB_MODE:-text}" in
   timeout) echo "Error: deadline exceeded (the request timed out)" >&2; exit 1 ;;  # -> exit 12
   badmodel) echo "Error: invalid --model \"X\": model X is not recognized as a known model" >&2; exit 1 ;; # -> exit 14
   softdeny) echo "no output produced — a tool required the \"write_file\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow" >&2; exit 0 ;; # rc=0 + empty stdout -> exit 15
+  # Successful run with benign stderr chatter (banner / deprecation / ConPTY fallback).
+  text_info_stderr) echo 'Info: telemetry enabled' >&2; echo 'DeprecationWarning: --legacy is deprecated' >&2; echo 'ConPTY fallback notice: using pipes' >&2; echo 'STUB_OK' ;;
+  # Successful run that nevertheless wrote an explicit error diagnostic to stderr.
+  text_error_stderr) echo 'Error: generated file is invalid' >&2; echo 'STUB_OK' ;;
   big)     printf 'x%.0s' $(seq 1 20000); echo ;;    # dump-sized reply -> digest guard warns
   # Dump-sized AND whitespace-bearing. `big` above is 20 KB of solid 'x', and $( ) strips
   # its one trailing newline, so the captured value contains NO whitespace at all — which
@@ -743,6 +747,26 @@ else
   else
     echo "FAIL: structured output silently disabled without a working python3"; FAIL=$((FAIL+1));
   fi
+fi
+
+# Finding 12: a passed run's banner stderr is not a list of failures.
+info_out=$(STUB_MODE=text_info_stderr "$DELEGATE" --json-digest "say hi" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='passed' and d['failures']==[]" "$info_out" 2>/dev/null; then
+  echo "ok: passed run ignores banner/deprecation/ConPTY stderr in failures"; PASS=$((PASS+1));
+else
+  echo "FAIL: passed run reported benign stderr as failures: $info_out"; FAIL=$((FAIL+1));
+fi
+errin_out=$(STUB_MODE=text_error_stderr "$DELEGATE" --json-digest "say hi" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='passed' and any('Error: generated file is invalid' in f for f in d['failures'])" "$errin_out" 2>/dev/null; then
+  echo "ok: passed run still reports an explicit error diagnostic"; PASS=$((PASS+1));
+else
+  echo "FAIL: passed run dropped an explicit stderr error: $errin_out"; FAIL=$((FAIL+1));
+fi
+fail_out=$(STUB_MODE=fail "$DELEGATE" --json-digest "say hi" 2>/dev/null)
+if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='failed' and any('boom' in f for f in d['failures'])" "$fail_out" 2>/dev/null; then
+  echo "ok: failed run still reports all stderr diagnostics"; PASS=$((PASS+1));
+else
+  echo "FAIL: failed run lost its stderr diagnostics: $fail_out"; FAIL=$((FAIL+1));
 fi
 
 # Finding 2: ensure unrelated transcripts from other brain sessions are not ingested into commandsRun
