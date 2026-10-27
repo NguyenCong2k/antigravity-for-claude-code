@@ -174,9 +174,16 @@ tee_usage() { # $1 = the full line, already formatted
   fi
 }
 
+# One physical line per bullet. A prompt or stderr excerpt containing a newline used to
+# break the template: the continuation printed as a new markdown paragraph, outside the
+# incident entry. Everything user- or agy-supplied goes through this.
+one_line() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/  */ /g'; }
+
 log_incident() { # $1=type $2=action $3=result $4=handling $5=suggestion
   [ -n "$INCIDENT_LOG" ] || return 0
-  local utctime type="$1" action="$2" result="$3" handling="$4" suggestion="$5"
+  local utctime type action result handling suggestion
+  type="$(one_line "$1")"; action="$(one_line "$2")"; result="$(one_line "$3")"
+  handling="$(one_line "$4")"; suggestion="$(one_line "$5")"
   utctime="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u)"
   mkdir -p "$(dirname "$INCIDENT_LOG")" 2>/dev/null || true
   cat >> "$INCIDENT_LOG" <<EOF
@@ -972,7 +979,10 @@ $blob"
     if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "error" 14; fi
     exit 14
   fi
-  log_incident "wrong_command" "${PROMPT:0:80}" "agy exited $RC" "exit 2" "inspect error logs"
+  # General execution failure (compile error, uncaught exception, agy crash): not a
+  # "wrong command". Keep agy's own diagnostic verbatim, trimmed to one line, in Kết quả.
+  err_excerpt="$(printf '%s' "$blob" | tr '\n\r\t' '   ' | sed 's/  */ /g' | cut -c1-300)"
+  log_incident "other" "${PROMPT:0:80}" "agy exited $RC${err_excerpt:+: $err_excerpt}" "exit 2" "inspect error logs"
   signal AGY_FAILED "agy exited $RC"
   if [ "$JSON_DIGEST" -eq 1 ]; then emit_digest_json "failed" "$RC"; fi
   exit 2

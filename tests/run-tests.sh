@@ -135,6 +135,7 @@ fi
 case "${STUB_MODE:-text}" in
   empty)   exit 0 ;;                  # no stdout -> wrapper should exit 3
   fail)    echo "boom" >&2; exit 7 ;; # nonzero  -> wrapper should exit 2
+  fail_diag) printf 'Traceback (most recent call last):\n  File "build.py", line 1, in <module>\nSyntaxError: invalid syntax\n' >&2; exit 2 ;; # verification diagnostic -> exit 2
   args)    printf '%s\n' "$*" ;;      # echo args for assertions
   argv)    for _a in "$@"; do printf 'ARG<%s>\n' "$_a"; done ;;  # one line per argv, boundary-safe
   quota)   echo "Error: quota exceeded for this model" >&2; exit 1 ;;     # -> wrapper exit 10
@@ -836,6 +837,23 @@ if [ -f "$ILOG" ] && grep -q "## .* — agy — " "$ILOG" && grep -q -- "- Loạ
   echo "ok: --incident-log logs incident on quota exhaustion"; PASS=$((PASS+1));
 else
   echo "FAIL: --incident-log did not record quota incident: $(cat "$ILOG" 2>/dev/null)"; FAIL=$((FAIL+1));
+fi
+
+# Finding 10: a general failure is not "wrong_command"; its stderr diagnostic must reach
+# Kết quả verbatim, and a multi-line prompt must not break the markdown entry.
+ILOG2="$TMP/incidents-diag.md"
+STUB_MODE=fail_diag "$DELEGATE" --incident-log "$ILOG2" $'first line\nsecond line' 2>/dev/null || true
+if grep -q -- "- Loại: other" "$ILOG2" 2>/dev/null \
+   && grep -q "SyntaxError: invalid syntax" "$ILOG2" \
+   && grep -q -- "^- Kết quả: agy exited 2: " "$ILOG2"; then
+  echo "ok: failure incident is classified other and carries agy's stderr"; PASS=$((PASS+1));
+else
+  echo "FAIL: failure incident lost its classification/diagnostic: $(cat "$ILOG2" 2>/dev/null)"; FAIL=$((FAIL+1));
+fi
+if grep -q -- " — agy — first line second line$" "$ILOG2" 2>/dev/null && ! grep -qx "second line" "$ILOG2"; then
+  echo "ok: multi-line prompt is flattened into the incident header"; PASS=$((PASS+1));
+else
+  echo "FAIL: multi-line prompt broke the incident markdown: $(cat "$ILOG2" 2>/dev/null)"; FAIL=$((FAIL+1));
 fi
 
 # Windows escaping and Unicode in prompt
