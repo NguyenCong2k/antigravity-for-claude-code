@@ -166,6 +166,9 @@ case "${STUB_MODE:-text}" in
   json_denied_actions_120) echo 'jetski: no output produced — a tool required the "write_file" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. write_file(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.' >&2; printf '{"conversation_id":"b13cec1d-55f6-482f-903b-e6b18a76afed","status":"SUCCESS","response":"","duration_seconds":2.88004,"num_turns":1,"usage":{"input_tokens":22670,"output_tokens":73,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":22743},"denied_actions":[{"action":"write_file","display_name":"WriteToFile"}]}'; exit 0 ;;
   # 1.1.28 made URL reads ask first; headless that is a denial too. Verbatim from 1.2.0.
   json_denied_readurl_120) echo 'jetski: no output produced — a tool required the "read_url" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. read_url(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.' >&2; printf '{"conversation_id":"2913e1f7-ea83-43be-8f0b-86834c541b00","status":"SUCCESS","response":"","duration_seconds":2.78866,"num_turns":1,"usage":{"input_tokens":22681,"output_tokens":41,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":22722},"denied_actions":[{"action":"read_url","display_name":"ReadUrlContent"}]}'; exit 0 ;;
+  # Same shape with a non-empty reply (not measured, but both branches must keep the
+  # digest parseable when a newer agy returns text alongside a denial).
+  json_denied_actions_text) echo 'jetski: a tool required the "write_file" permission that headless mode cannot prompt for, so it was auto-denied.' >&2; printf '{"conversation_id":"c1","status":"SUCCESS","response":"DENIED_PARTIAL_REPLY","usage":{},"denied_actions":[{"action":"write_file","display_name":"WriteToFile"}]}'; exit 0 ;;
   # agy 1.1.28: a --print-timeout that expires mid-turn returns the PARTIAL reply with rc 0,
   # one stderr line, and an envelope with every usage counter at zero. Verbatim from 1.2.0
   # (the reply shortened).
@@ -664,6 +667,21 @@ else echo "ok: plain-mode timeout note does not mention a nonexistent AGY_USAGE 
 # Negative control: the same wording inside the reply with clean stderr is a success.
 nt_out=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_reply_mentions_timeout "$DELEGATE" "review it" 2>/dev/null); nt_rc=$?
 check "timeout wording inside the reply alone never classifies" 0 "$nt_rc" "JSONBODY" "$nt_out"
+
+# Finding 7: --json-digest is the only stdout contract. The partial reply must move into
+# the digest, never precede it as raw text (a caller's JSON parser would reject the mix).
+ptjd_out=$(STUB_MODE=partial_timeout_120 "$DELEGATE" --json-digest --timeout 5s "write an essay" 2>/dev/null); ptjd_rc=$?
+if [ "$ptjd_rc" = 12 ] && python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='blocked' and 'Cogwheels' in d.get('result','')" "$ptjd_out" 2>/dev/null; then
+  echo "ok: --json-digest partial timeout emits one JSON digest carrying the partial reply"; PASS=$((PASS+1));
+else
+  echo "FAIL: --json-digest partial timeout corrupted stdout (rc=$ptjd_rc): $ptjd_out"; FAIL=$((FAIL+1));
+fi
+dajd_out=$(STUB_JSON_CAPABLE=1 STUB_MODE=json_denied_actions_text "$DELEGATE" --json-digest "write a file" 2>/dev/null); dajd_rc=$?
+if [ "$dajd_rc" = 15 ] && python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='blocked' and d.get('result')=='DENIED_PARTIAL_REPLY'" "$dajd_out" 2>/dev/null; then
+  echo "ok: --json-digest denied run emits one JSON digest carrying the reply"; PASS=$((PASS+1));
+else
+  echo "FAIL: --json-digest denied run corrupted stdout (rc=$dajd_rc): $dajd_out"; FAIL=$((FAIL+1));
+fi
 
 check "exit-15 message offers the narrower grant first" 15 "$rc" "permissions.allow" "$out"
 # The message must not hand the pre-1.1.11 match-everything history to the placeholder it

@@ -231,6 +231,7 @@ emit_digest_json() { # $1=status $2=exit_code
   DIGEST_OUT_FILE="$OUTF" \
   DIGEST_TARGET_DIR="${WORKTREE_DIR:-$PWD}" \
   DIGEST_CONV_ID="${CONV_ID:-}" \
+  DIGEST_RESULT="${DIGEST_RESULT:-}" \
   "$PYTHON_BIN" - <<'PY'
 import json, os, subprocess, sys
 
@@ -240,6 +241,7 @@ log_path = os.environ.get("DIGEST_LOG_PATH", "")
 err_file = os.environ.get("DIGEST_ERR_FILE", "")
 out_file = os.environ.get("DIGEST_OUT_FILE", "")
 target_dir = os.environ.get("DIGEST_TARGET_DIR", os.getcwd())
+result_text = os.environ.get("DIGEST_RESULT", "")
 
 files_changed = []
 try:
@@ -338,6 +340,10 @@ digest = {
 }
 if worktree:
     digest["worktree"] = worktree
+if result_text:
+    digest["result"] = result_text[:4000]
+    if len(result_text) > 4000:
+        digest["resultTruncated"] = True
 
 print(json.dumps(digest, indent=2, ensure_ascii=False))
 PY
@@ -879,7 +885,11 @@ fi
 # the task was not done as asked.
 if [ -n "$JSON_DENIED" ]; then
   DENIED_ACTIONS="$JSON_DENIED"
-  if [[ "$OUT" = *[!$' \t\n\r']* ]]; then printf '%s\n' "$OUT"; fi
+  if [[ "$OUT" = *[!$' \t\n\r']* ]]; then
+    # A JSON digest is the ONLY stdout contract for this run. Printing the reply first
+    # corrupts the caller's parser; carry it in the digest instead.
+    if [ "$JSON_DIGEST" -eq 1 ]; then DIGEST_RESULT="$OUT"; else printf '%s\n' "$OUT"; fi
+  fi
   permission_denied
 fi
 
@@ -892,7 +902,11 @@ fi
 # reply is worth having as long as the exit code says what it is. Anchored on agy's
 # stderr line only; the reply is never scanned.
 if [ "$RC" -eq 0 ] && grep -qE 'print timeout after .*returning partial output' "$ERR" 2>/dev/null; then
-  if [[ "$OUT" = *[!$' \t\n\r']* ]]; then printf '%s\n' "$OUT"; fi
+  if [[ "$OUT" = *[!$' \t\n\r']* ]]; then
+    # Same stdout contract as the denied path: --json-digest must emit exactly one JSON
+    # document, so the partial reply goes into the digest, not ahead of it.
+    if [ "$JSON_DIGEST" -eq 1 ]; then DIGEST_RESULT="$OUT"; else printf '%s\n' "$OUT"; fi
+  fi
   # The AGY_USAGE line exists only in JSON mode; do not point plain-text callers at a line
   # that was never printed (review caught the unconditional wording).
   usage_note=""; [ "$JSON_MODE" -eq 1 ] && usage_note=", so the AGY_USAGE line above undercounts"
