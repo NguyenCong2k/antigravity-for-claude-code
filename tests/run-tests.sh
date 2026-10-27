@@ -8,7 +8,6 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-[ -d "/c/Users/Ca/AppData/Local/Python/bin" ] && export PATH="/c/Users/Ca/AppData/Local/Python/bin:$PATH"
 DELEGATE="$ROOT/scripts/agy-delegate.sh"
 
 MEASURE="$ROOT/scripts/measure-session.py"
@@ -691,6 +690,31 @@ if python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='
   echo "ok: CLAUDE_PLUGIN_OPTION_JSON_DIGEST=true emits JSON digest"; PASS=$((PASS+1));
 else
   echo "FAIL: CLAUDE_PLUGIN_OPTION_JSON_DIGEST=true did not emit JSON digest: $jd_env_out"; FAIL=$((FAIL+1));
+fi
+
+# Finding 6: the digest must not assume `python3` exists. Windows commonly ships only
+# `python.exe`; a PATH whose first `python3` is a broken shim and whose `python` works
+# pins the fallback without building a whole userland (a curated PATH breaks MSYS bash,
+# which needs the DLLs beside its real executable).
+PYONLY="$TMP/pyonly"; mkdir -p "$PYONLY"
+printf '#!/bin/sh\necho "python3: not a working interpreter" >&2\nexit 127\n' > "$PYONLY/python3"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v python3)" > "$PYONLY/python"
+chmod +x "$PYONLY/python3" "$PYONLY/python"
+if PATH="$PYONLY:$PATH" python3 -c 'import sys' >/dev/null 2>&1; then
+  echo "FAIL: broken python3 shim unexpectedly works — the fallback test proves nothing"; FAIL=$((FAIL+1));
+else
+  pyonly_out=$(PATH="$PYONLY:$PATH" STUB_MODE=text "$DELEGATE" --json-digest "say hi" 2>/dev/null); pyonly_rc=$?
+  if [ "$pyonly_rc" = 0 ] && python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['status']=='passed'" "$pyonly_out" 2>/dev/null; then
+    echo "ok: --json-digest falls back to python when python3 is missing/broken"; PASS=$((PASS+1));
+  else
+    echo "FAIL: --json-digest requires a working python3 (rc=$pyonly_rc): $pyonly_out"; FAIL=$((FAIL+1));
+  fi
+  pyonly_err=$(PATH="$PYONLY:$PATH" STUB_JSON_CAPABLE=1 STUB_MODE=json_ok "$DELEGATE" "hi" 2>&1 >/dev/null); pyonly_erc=$?
+  if [ "$pyonly_erc" = 0 ] && grep -q '^AGY_USAGE ' <<<"$pyonly_err"; then
+    echo "ok: structured output uses python when python3 is missing/broken"; PASS=$((PASS+1));
+  else
+    echo "FAIL: structured output silently disabled without a working python3"; FAIL=$((FAIL+1));
+  fi
 fi
 
 # Finding 2: ensure unrelated transcripts from other brain sessions are not ingested into commandsRun

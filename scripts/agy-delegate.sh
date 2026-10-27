@@ -113,6 +113,21 @@ die() { echo "agy-delegate: $*" >&2; exit 1; }
 # (avoids `shift 2` aborting under `set -e` with a cryptic "shift count" error).
 need() { [ "$1" -ge 2 ] || die "option '$2' needs a value"; }
 
+# Resolve a Python interpreter once. Windows ships `python.exe` without a `python3`
+# alias, and the reverse happens on minimal Linux images, so neither name can be
+# assumed. Probe with a real `-c` (a Windows Store `python3` shim exists and is not an
+# interpreter). Empty when neither works; the bash-only paths stay dependency-free.
+pick_python() {
+  local c
+  for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys' >/dev/null 2>&1; then
+      command -v "$c"; return 0
+    fi
+  done
+  return 1
+}
+PYTHON_BIN="$(pick_python || true)"
+
 # True when an agy error blob says the requested --model does not exist on this plan.
 # ONE definition, used by both the exit-14 classifier and the pro-tier fallback trigger
 # (#104): if agy rewords the message, both move together — a drift between the two
@@ -200,6 +215,15 @@ emit_digest_json() { # $1=status $2=exit_code
     cat "$ERR" 2>/dev/null
   } > "$LOG_PATH" 2>/dev/null || true
 
+  if [ -z "$PYTHON_BIN" ]; then
+    # No interpreter at all: still emit valid JSON so a caller parsing stdout gets a
+    # digest instead of a syntax error. The richer fields need Python.
+    _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+    printf '{"status":"%s","filesChanged":[],"commandsRun":[],"testsSummary":"","failures":[],"logPath":"%s"}\n' \
+      "$(_esc "$st")" "$(_esc "$LOG_PATH")"
+    return 0
+  fi
+
   DIGEST_STATUS="$st" \
   DIGEST_WORKTREE="${WORKTREE_DIR:-}" \
   DIGEST_LOG_PATH="$LOG_PATH" \
@@ -207,7 +231,7 @@ emit_digest_json() { # $1=status $2=exit_code
   DIGEST_OUT_FILE="$OUTF" \
   DIGEST_TARGET_DIR="${WORKTREE_DIR:-$PWD}" \
   DIGEST_CONV_ID="${CONV_ID:-}" \
-  python3 - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import json, os, subprocess, sys
 
 status = os.environ.get("DIGEST_STATUS", "passed")
@@ -627,7 +651,7 @@ for d in "${ADD_DIRS[@]:-}"; do [ -n "$d" ] && ARGS+=(--add-dir "$d"); done
 #
 # Gated three ways, falling back to plain text if any is unmet:
 #   * agy actually advertises --output-format (older versions don't),
-#   * python3 is available to parse (the bash-only path stays dependency-free),
+#   * a Python interpreter is available to parse (the bash-only path stays dependency-free),
 #   * the user hasn't opted out (structured_output=off).
 # NOTE: agy 1.1.8 emits a RAW newline inside the "response" string, which strict
 # JSON parsers reject — so we parse with strict=False. (Reported upstream.)
@@ -650,7 +674,7 @@ raw_so="${CLAUDE_PLUGIN_OPTION_STRUCTURED_OUTPUT:-on}"
 case "$(printf '%s' "$raw_so" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
   off|false|0|no|disabled) ;;
   *)
-    if [ "$PRINT_CMD" -ne 1 ] && command -v python3 >/dev/null 2>&1; then
+    if [ "$PRINT_CMD" -ne 1 ] && [ -n "$PYTHON_BIN" ]; then
       # Capability probe. Deliberately NOT `agy --help | grep -q`: `grep -q` exits at
       # the first match and closes the pipe, so `agy --help` can die of SIGPIPE (141)
       # and, under `set -o pipefail`, the whole pipeline reads as "failed" — silently
@@ -751,7 +775,7 @@ while :; do
     # come out as one space-separated line, same file discipline as the error text.
     JDEN="$(mktemp "${TMPDIR:-/tmp}/agy-den.XXXXXX")"
     meta="$(AGY_JSON="$OUT" AGY_RESP_FILE="$RESP" AGY_ERR_FILE="$JERR" AGY_DEN_FILE="$JDEN" \
-          AGY_MODEL="$MODEL" AGY_TIER="$USAGE_TIER" python3 - <<'PY' 2>/dev/null || true
+          AGY_MODEL="$MODEL" AGY_TIER="$USAGE_TIER" "$PYTHON_BIN" - <<'PY' 2>/dev/null || true
 import json, os, sys
 raw = os.environ.get("AGY_JSON", "")
 try:
